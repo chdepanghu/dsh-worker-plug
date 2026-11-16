@@ -1,0 +1,68 @@
+{
+  "name": "dsh-requirement-dev-workbench",
+  "version": "4.5.0",
+  "private": false,
+  "type": "module",
+  "description": "AI Native 工作台：把「拿任务 → 开发 → 验收」串成一条流水线。跨多张飞书多维表格看开发任务与进度，拉取飞书文档信息，用专家/专家团跑完整流程（需求分析 → 代码开发 → 代码评审 → QA 测试），选中本地项目后一键生成开发指令，并可浏览项目/全局 skill 与开发规范。模块可扩展。",
+  "license": "MIT",
+  "author": "EDY",
+  "main": "dsh/index.js",
+  "homepage": "https://github.com/chdepanghu/dsh-worker-plug#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chdepanghu/dsh-worker-plug.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chdepanghu/dsh-worker-plug/issues"
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "exports": {
+    ".": "./dsh/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "dsh-desktop-workbenches"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "@deepseek-ai/schemastery": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "files": [
+    "dsh",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-workbench",
+    "ai-native",
+    "workbench",
+    "requirement",
+    "feishu",
+    "lark"
+  ]
+}

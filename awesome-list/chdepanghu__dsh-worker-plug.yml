@@ -1,0 +1,6 @@
+url: https://github.com/chdepanghu/dsh-worker-plug
+name: chdepanghu/dsh-worker-plug
+category: workflow
+description:
+  en: 'AI-native delivery workbench: reads Feishu (Lark) requirement and task tables through the local lark-cli, shows lists, Kanban and progress, runs a requirement-analysis, development, review and QA pipeline with experts or teams, and turns a record into a ready-to-send AI development prompt.'
+  zh: 'AI Native 工作台：通过本机 lark-cli 读飞书多维表格的需求与任务，提供汇总清单、卡片看板和进度视图，用专家/专家团跑需求分析 → 代码开发 → 代码评审 → QA 测试流水线，并把一条记录生成可直接发给 AI 的开发指令。'
