@@ -322,12 +322,12 @@ node test/smoke.mjs       # 可选：跑冒烟测试，默认应该 PASS、无 F
 
 > 冒烟测试里的真实表信息走环境变量或本机私有文件 `test/smoke.local.json`（已 gitignore，不进仓库）。没有配置时，涉及真实飞书读写的检查会记为 WARN 而不是 FAIL，所以别人 clone 下来也能直接跑。
 
-## 装到本机（这台 DSH Desktop）
+## 装到本机（DSH Desktop）
 
-按 DSH 工作台包规范打包（`pnpm pack` 产出 `.tgz`，内含声明的服务端/客户端入口与 `cordis.patch.yml`）。在当前这台 DSH Desktop 上，**插件由桌面端自己管理**（包目录是桌面端「插件代次」投影出来的链接），命令行 `dsh plugin add` 只完成一半、不会被桌面端登记，所以请走界面：
+按 DSH 工作台包规范打包（`pnpm pack` 产出 `.tgz`，内含声明的服务端/客户端入口与 `cordis.patch.yml`）。在 DSH Desktop 上，**插件由桌面端自己管理**（包目录是桌面端「插件代次」投影出来的链接），命令行 `dsh plugin add` 只完成一半、不会被桌面端登记，所以请走界面：
 
 1. 打开 **设置 → 插件**（页面写明可填包名、GitHub 仓库地址或**本地目录路径**）；
-2. 点 **「添加插件」**，填本仓库打出的 **tgz 完整路径**（本机历次安装都是这样装的，例：`D:\workspace\deepseak_harness\requirement-dev-workbench\dsh-requirement-dev-workbench-4.1.0.tgz`），安装；也可以填本机插件目录的绝对路径（本仓库即 `D:\workspace\deepseak_harness\requirement-dev-workbench`）；
+2. 点 **「添加插件」**，填 GitHub 地址 `https://github.com/chdepanghu/dsh-worker-plug.git`，或本仓库打出的 **tgz 完整路径**，或本机插件目录的绝对路径，安装；
 3. 页面提示「该插件已安装，如需升级请卸载后重新安装」时：先去「已安装」卸载旧版本，再重复第 2 步（这样界面名称与版本会一起刷新，不会多出第二个入口）；
 4. **完整退出 DSH Desktop 再重新打开**——工作台的界面与后端要重启后才生效；
 5. 重开后从左侧入口或「已安装的工作台」进入。

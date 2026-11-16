@@ -1240,7 +1240,7 @@ const sampleSkillsData = {
   ],
   docs: [{ id: 'doc:03-coding', name: '03-coding', path: 'D:\\p\\doc\\standards\\03-coding.md' }],
   projectDir: 'D:\\workspace\\demo-project',
-  harnessSkillDir: 'C:\\Users\\EDY\\AppData\\Roaming\\dsh-desktop\\harness\\skills',
+  harnessSkillDir: 'C:\\Users\\demo\\AppData\\Roaming\\dsh-desktop\\harness\\skills',
   summary: [
     { scope: 'harness', roots: 1, exists: 1, skills: 1, agents: 0 },
     { scope: 'global', roots: 7, exists: 4, skills: 41, agents: 2 },
@@ -1291,7 +1291,7 @@ const skillsCreating = withInjectedState({ 0: sampleSkillsData, 9: true }, () =>
 const creatingText = collectText(skillsCreating).join(' ')
 check(
   '新建技能表单默认写 DeepSeek Harness 通用目录',
-  creatingText.includes('新建技能') && creatingText.includes('写入 DeepSeek Harness 通用技能目录') && creatingText.includes('C:\\Users\\EDY\\AppData\\Roaming\\dsh-desktop\\harness\\skills'),
+  creatingText.includes('新建技能') && creatingText.includes('写入 DeepSeek Harness 通用技能目录') && creatingText.includes('C:\\Users\\demo\\AppData\\Roaming\\dsh-desktop\\harness\\skills'),
   creatingText.slice(0, 220),
 )
 const creatingInputs = collectByType(skillsCreating, 'input').map((node) => node.props?.['aria-label'])
