@@ -665,6 +665,12 @@ check(
   pkgJson.version === String(clientSource.match(/WORKBENCH_VERSION = '([^']+)'/)?.[1] ?? '') && /^\d+\.\d+\.\d+$/.test(pkgJson.version),
   { pkg: pkgJson.version, client: clientSource.match(/WORKBENCH_VERSION = '([^']+)'/)?.[1] },
 )
+// v4.5.4 回归：改项目目录后必须自动重读表/专家/页面配置，否则模块栏停在旧工程上
+check(
+  '改项目目录后会重读飞书表 / 专家 / 页面配置（不再需要整页刷新）',
+  clientSource.includes('const lastProjectDirRef = useRef(null)') &&
+    clientSource.includes('[state?.settings?.projectDir, reloadTables, reloadView, reloadExperts, loadOverview]'),
+)
 
 /* --------------------------- 客户端真的能加载：桩 React 直接执行组件函数体 */
 
@@ -1668,6 +1674,13 @@ check(
 check(
   '目录选择器走工作台自己的只读接口（不依赖宿主 pickDirectory）',
   clientSource.includes('api(`/fs/list') && clientSource.includes('function DirectoryPickerDialog'),
+)
+check(
+  '目录选择器：弹窗放大 + 列表自身滚动（底部按钮不会被挤出屏幕）',
+  clientSource.includes("width: 'min(920px,96vw)'") &&
+    clientSource.includes("flexDirection: 'column'") &&
+    clientSource.includes("flex: '1 1 auto'") &&
+    clientSource.includes('个子目录 · 双击文件夹可直接选中'),
 )
 
 // v4.5.3 回归：设置页是「提前 return」的独立分支，弹窗必须也挂在那一层
