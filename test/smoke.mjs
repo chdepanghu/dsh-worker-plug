@@ -669,7 +669,15 @@ stubReact.useState = (initial) => {
 let clientModule = null
 globalThis.window = { __ModuleLoader__: { load: (definition) => { clientModule = definition.factory((name) => (name === 'react' ? stubReact : undefined)) } } }
 new Function('window', clientSource)(globalThis.window)
-check('客户端能加载并向宿主注册', Boolean(clientModule?.apply) && Array.isArray(clientModule?.inject) && clientModule.inject.includes('desktopWorkbenches'))
+check(
+  '客户端能加载，且不再硬依赖 desktopWorkbenches（官方 Harness 没有该服务）',
+  Boolean(clientModule?.apply) && Array.isArray(clientModule?.inject) && !clientModule.inject.includes('desktopWorkbenches'),
+  { inject: clientModule?.inject },
+)
+check(
+  '客户端带官方 Harness 的原生接入点：main 主面板 + sidebar.panellist 左栏入口',
+  clientSource.includes("slots.inject('main'") && clientSource.includes("slots.inject('sidebar.panellist'"),
+)
 
 const pure = clientModule?.__pure ?? {}
 const components = clientModule?.__components ?? {}
@@ -1592,49 +1600,97 @@ entryInsertAccepts = true
 const entryNoActions = withInjectedState({ 0: true, 1: sampleExpertData }, () => renderComponent('ExpertComposerEntry', {}, '输入框入口（宿主没给 inputActions）'))
 check('宿主没给 inputActions 时照常渲染（入口不崩）', Boolean(entryNoActions?.type))
 
-// 注册：工作台要靠 slots.inject('conversation.input.left') 挂到那排「＋」旁边
+// 注册：两条宿主路径都要走通
+//  A) 官方 DeepSeek Harness：没有 desktopWorkbenches → 原生 main 主面板 + sidebar.panellist 左栏入口；
+//  B) DSH Desktop：有 desktopWorkbenches → 仍交给它的工作台框架。
 const slotRegistrations = []
 const slotInjected = []
-const fakeSlotsCtx = {
-  get: () => undefined,
-  effect: (callback) => callback(),
-  desktopWorkbenches: { register: () => () => {} },
-  slots: {
-    inject: (key, callback) => {
-      slotInjected.push(key)
-      callback()
-    },
-    register: (meta, render) => {
-      slotRegistrations.push({ meta, render })
-      return () => {}
-    },
+const makeSlots = () => ({
+  inject: (key, callback) => {
+    slotInjected.push(key)
+    callback()
+    return () => {}
   },
+  register: (meta, render) => {
+    slotRegistrations.push({ meta, render })
+    return () => {}
+  },
+})
+const nativeSlots = makeSlots()
+let layoutSelected = 'unset'
+const fakeNativeCtx = {
+  get: (name) =>
+    name === 'slots'
+      ? nativeSlots
+      : name === 'layout'
+        ? { selectPanel: (id) => { layoutSelected = id } }
+        : undefined,
+  effect: (callback) => callback(),
 }
 let applyThrew = false
 try {
-  clientModule?.apply?.(fakeSlotsCtx)
-} catch (error) {
+  clientModule?.apply?.(fakeNativeCtx)
+} catch {
   applyThrew = true
 }
+check('官方 Harness（无 desktopWorkbenches）：工作台照常加载', !applyThrew)
+const findSlot = (name, predicate = () => true) => slotRegistrations.find((entry) => entry.meta?.name === name && predicate(entry.meta))
+const expertEntry = findSlot('conversation.input.left')
+const mainPanel = findSlot('main', (meta) => meta.key === 'ai-native-workbench')
+const sidebarEntry = findSlot('sidebar.panellist', (meta) => meta.id === 'ai-native-workbench')
 check(
-  '工作台把自己挂到宿主对话输入框的「＋」那排',
-  !applyThrew && slotInjected.includes('conversation.input.left') && slotRegistrations[0]?.meta?.id === 'rdw-expert-entry' && slotRegistrations[0]?.meta?.name === 'conversation.input.left',
-  { injected: slotInjected, meta: slotRegistrations[0]?.meta },
+  '官方 Harness：对话输入框的「＋ 专家」入口照旧注册在最左端',
+  Boolean(expertEntry) && Number(expertEntry.meta.order) < 40 && typeof expertEntry.meta.label === 'function',
+  expertEntry?.meta,
 )
+check('官方 Harness：注册 main 主面板（key = ai-native-workbench）', Boolean(mainPanel), slotRegistrations.map((entry) => entry.meta))
 check(
-  '入口排在最左端（对齐 WorkBuddy：order 取小值，不动宿主原生控件）',
-  Number(slotRegistrations[0]?.meta?.order) < 40 && typeof slotRegistrations[0]?.meta?.label === 'function',
-  slotRegistrations[0]?.meta?.order,
+  '官方 Harness：注册左栏入口（sidebar.panellist，id 同名）',
+  Boolean(sidebarEntry) && typeof sidebarEntry.meta.label === 'function',
 )
-const slotEntryElement = slotRegistrations[0]?.render?.({ inputActions: entryInputActions })
+check('官方 Harness：左栏入口的图标组件可渲染', Boolean(sidebarEntry?.render?.({ size: 18 })?.type))
+const slotEntryElement = expertEntry?.render?.({ inputActions: entryInputActions })
 check(
-  '宿主渲染这个入口时，拿到的是专家入口组件（并带着宿主给的 inputActions）',
-  slotEntryElement?.type === components.ExpertComposerEntry && Boolean(slotEntryElement?.props?.inputActions) && slotEntryElement?.props?.inputActions === entryInputActions,
+  '宿主渲染专家入口时，拿到的是专家入口组件（并带着宿主给的 inputActions）',
+  slotEntryElement?.type === components.ExpertComposerEntry && slotEntryElement?.props?.inputActions === entryInputActions,
   slotEntryElement?.type?.name ?? slotEntryElement?.type,
 )
+const panelElement = mainPanel?.render?.()
+check(
+  '官方 Harness：主面板渲染的是工作台本体（BusinessPanel）',
+  panelElement?.type === components.BusinessPanel,
+  panelElement?.type?.name ?? panelElement?.type,
+)
+panelElement?.props?.service?.desktopWorkbenches?.leave?.()
+check('官方 Harness：「收起工作台 / 展开对话」切回原生对话（selectPanel(null)）', layoutSelected === null, layoutSelected)
+
+// B) Desktop 宿主：有 desktopWorkbenches 时优先交给它，且不再重复注册原生主面板。
+slotRegistrations.length = 0
+slotInjected.length = 0
+const desktopSlots = makeSlots()
+let hostRegistered = null
+const fakeDesktopCtx = {
+  get: (name) =>
+    name === 'slots'
+      ? desktopSlots
+      : name === 'desktopWorkbenches'
+        ? { register: (meta, render) => { hostRegistered = { meta, render }; return () => {} } }
+        : undefined,
+  effect: (callback) => callback(),
+}
+let desktopThrew = false
+try {
+  clientModule?.apply?.(fakeDesktopCtx)
+} catch {
+  desktopThrew = true
+}
+check('DSH Desktop（有 desktopWorkbenches）：优先注册到工作台宿主', !desktopThrew && Boolean(hostRegistered) && hostRegistered.meta?.title === 'AI Native 工作台')
+check('DSH Desktop：不在原生 main 面板重复注册', !slotRegistrations.some((entry) => entry.meta?.name === 'main'))
+
+// C) 连 slots 都没有：静默跳过，不拖垮宿主启动。
 let degradeThrew = false
 try {
-  clientModule?.apply?.({ get: () => undefined, effect: (callback) => callback(), desktopWorkbenches: { register: () => () => {} } })
+  clientModule?.apply?.({ get: () => undefined, effect: (callback) => callback() })
 } catch {
   degradeThrew = true
 }

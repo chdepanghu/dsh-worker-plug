@@ -1,16 +1,17 @@
 # AI Native 工作台（包名 dsh-requirement-dev-workbench）
 
-DSH Desktop 工作台：把**「拿任务 → 开发 → 验收」串成一条流水线**——跨多张飞书多维表格看开发任务与进度，拉取**飞书文档**信息，用**专家/专家团**跑完整流程（**需求分析 → 代码开发 → 代码评审 → QA 测试**），选中本地项目后生成可以直接交给 AI 的开发指令，并能随手翻项目/全局 skill 与开发规范。模块可扩展。
+DeepSeek Harness / DSH Desktop 插件：把**「拿任务 → 开发 → 验收」串成一条流水线**——跨多张飞书多维表格看开发任务与进度，拉取**飞书文档**信息，用**专家/专家团**跑完整流程（**需求分析 → 代码开发 → 代码评审 → QA 测试**），选中本地项目后生成可以直接交给 AI 的开发指令，并能随手翻项目/全局 skill 与开发规范。模块可扩展。
 
 > **本仓库 = 插件市场分发仓库**（[`chdepanghu/dsh-worker-plug`](https://github.com/chdepanghu/dsh-worker-plug)）。开发主仓库仍是 [chdepanghu/dsh-worker](https://github.com/chdepanghu/dsh-worker)；本仓库按「可直接安装的 DSH bundle」打包发布，不改动主仓库代码。
 >
 > **安装（任选其一）**
 >
-> 1. **插件市场（收录后）**：DSH Desktop → 设置 → 插件 → 插件市场 → 搜索 **AI Native 工作台** → 安装 → 重启 Harness。收录条目见 [`awesome-list/`](./awesome-list)，提交说明见 [`docs/PUBLISHING.md`](./docs/PUBLISHING.md)。
-> 2. **GitHub 直接安装（收录前也能用）**：设置 → 插件 → 添加插件 → 填 `https://github.com/chdepanghu/dsh-worker-plug.git`（也接受本仓库目录，或 `pnpm pack` 产出的 `.tgz` 完整路径）→ 安装 → 重启 Harness。
-> 3. **命令行（自建 `dsh web` profile）**：`dsh plugin --profile <profile> add github:chdepanghu/dsh-worker-plug`。
+> 1. **官方 DeepSeek Harness（0.2.2+）**：设置 → 插件 → 添加插件 → 填 `https://github.com/chdepanghu/dsh-worker-plug.git`（也接受本仓库目录，或 `pnpm pack` 产出的 `.tgz` 完整路径）→ 安装 → **重启 DeepSeek Harness**。重开后左栏面板列表（和「插件」「自动化任务」同一排）出现 **AI Native 工作台** 图标，点开即用；页面上的「展开对话」直接切回原生对话。
+> 2. **插件市场（收录后）**：同一入口的插件市场 → 搜索 **AI Native 工作台** → 安装 → 重启。收录条目见 [`awesome-list/`](./awesome-list)，提交说明见 [`docs/PUBLISHING.md`](./docs/PUBLISHING.md)。
+> 3. **DSH Desktop（社区版）**：设置 → 插件 → 添加插件 → 安装 → 重启 Harness，装完在左上角「工作台」切换区选 **AI Native 工作台**。
+> 4. **命令行（自建 `dsh web` profile）**：`dsh plugin --profile <profile> add github:chdepanghu/dsh-worker-plug`。
 >
-> Desktop 自带的插件由桌面端自己管理：用 Desktop 时请走界面安装（命令行只完成一半，桌面端不登记）。装完 **完整退出 DSH Desktop 再打开**，在左上角「工作台」切换区选 **AI Native 工作台**。
+> 官方 Harness 没有社区版的工作台宿主（`desktopWorkbenches` 服务），从 v4.5.1 起改为**原生主面板 + 左栏入口**接入；检测到 Desktop 的工作台宿主时仍走原来那套并排对话布局。
 
 从 **v4.2.0** 起，「验收」不再是点一下按钮：每个阶段的完成都要有**凭据**（命令 / 文件 / 测试 / 链接 / spec 路径）。没凭据也能完成，但会记成「已完成 · 无凭据」并在台账里单独计数。
 
@@ -18,7 +19,7 @@ DSH Desktop 工作台：把**「拿任务 → 开发 → 验收」串成一条�
 >
 > **每个版本改了什么，看 [CHANGELOG.md](./CHANGELOG.md)** —— 一条一句话，只讲用户能感知的变化。
 
-- 形态：**自定义整块框架**（`customFrame: true`，对齐本机 SEO/GEO 工作台的布局方式）：顶栏 + 左侧模块导航 + 右侧内容区；右侧可展开宿主**原生对话**，一边看任务一边对着 AI 说。
+- 形态：**自定义整块框架**：官方 Harness 里注册成原生主面板（左栏同名图标进入）；DSH Desktop 里走它的工作台宿主（`customFrame: true`，右侧可并排宿主原生对话）。两种宿主下都是顶栏 + 左侧模块导航 + 内容区。
 - 模块：`总览`、`AI 全流程`、`飞书文档`、`项目开发`、`专家与专家团`、每张飞书表一个模块（默认 `开发需求 · <项目>`、`开发任务 · <项目>`）、`技能与规范`，模块栏底部有 `＋ 添加模块`、版本号与 `收起工作台`。
 - 看板卡片：**固定长宽**（216×152），**卡片上展示哪些字段可在页面配置里勾选**（最多 4 个，一行一个「字段名 值」、超出省略、悬停看全文；不配就自动用 状态/负责人/优先级/期望完成时间），点卡片在**右侧打开详情栏**（可一键收起、可拖拽调宽，见下面「记录详情栏」）；卡片右上角是**执行记录角标**——已交付／进行中／已完成／受阻 + 次数，点进去就是这条需求的执行记录与状态按钮。
 - 读数据的两条通道：优先用 lark-cli 的 ndjson（每条记录自带字段名）；只有拿不到时才退回值矩阵，并用返回体自带的 `data.fields` 对齐列名（**列名对不上就不显示数据并给出原因，绝不猜**）。写回状态走 `+record-batch-update`（记录的 `record_id`，`--json` 用 `@文件` 传，避开命令行引号问题），**点按钮后先在页面上确认一次才真的写飞书**。
@@ -322,9 +323,19 @@ node test/smoke.mjs       # 可选：跑冒烟测试，默认应该 PASS、无 F
 
 > 冒烟测试里的真实表信息走环境变量或本机私有文件 `test/smoke.local.json`（已 gitignore，不进仓库）。没有配置时，涉及真实飞书读写的检查会记为 WARN 而不是 FAIL，所以别人 clone 下来也能直接跑。
 
+## 装到本机（官方 DeepSeek Harness）
+
+按 DSH 插件包规范打包（`pnpm pack` 产出 `.tgz`，内含服务端/客户端入口与 `cordis.patch.yml`）。官方 Harness 里用**设置 → 插件 → 添加插件**：
+
+1. 填 GitHub 地址 `https://github.com/chdepanghu/dsh-worker-plug.git`、本仓库打出的 **tgz 完整路径**，或本机插件目录的绝对路径，安装；
+2. **重启 DeepSeek Harness**（客户端插件在启动时装配，热装后要重开才出现入口）；
+3. 重开后左栏面板列表出现 **AI Native 工作台** 图标（和「插件」「自动化任务」同排），点开即用；页面上「展开对话」切回原生对话，想回工作台再点这个图标。
+
+不需要装社区版 DSH Desktop，也不再依赖它的 `desktopWorkbenches` 服务。
+
 ## 装到本机（DSH Desktop）
 
-按 DSH 工作台包规范打包（`pnpm pack` 产出 `.tgz`，内含声明的服务端/客户端入口与 `cordis.patch.yml`）。在 DSH Desktop 上，**插件由桌面端自己管理**（包目录是桌面端「插件代次」投影出来的链接），命令行 `dsh plugin add` 只完成一半、不会被桌面端登记，所以请走界面：
+在 DSH Desktop 上，**插件由桌面端自己管理**（包目录是桌面端「插件代次」投影出来的链接），命令行 `dsh plugin add` 只完成一半、不会被桌面端登记，所以请走界面：
 
 1. 打开 **设置 → 插件**（页面写明可填包名、GitHub 仓库地址或**本地目录路径**）；
 2. 点 **「添加插件」**，填 GitHub 地址 `https://github.com/chdepanghu/dsh-worker-plug.git`，或本仓库打出的 **tgz 完整路径**，或本机插件目录的绝对路径，安装；

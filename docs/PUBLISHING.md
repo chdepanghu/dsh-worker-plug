@@ -23,7 +23,7 @@
 | 声明 `dsh.bundle` | [`package.json`](../package.json) → `dsh.bundle.patch: ./cordis.patch.yml` |
 | `cordis.patch.yml` 里的 `name` 是包名 | `dsh-requirement-dev-workbench` |
 | 真实可用代码 | `dsh/index.js`（Host，约 130 KB）+ `lib/client.js`（Client，约 275 KB）+ `test/` 自测 |
-| 浏览器 UI 入口 | `exports["./client"]`、`dsh.client.platform: web`、`dsh.client.inject: ["dsh-desktop-workbenches"]` |
+| 浏览器 UI 入口 | `exports["./client"]`、`dsh.client.platform: web`；官方 Harness 注册原生 `main` 主面板 + `sidebar.panellist` 左栏入口，DSH Desktop 检测到工作台宿主时仍走它 |
 | 包体积 ≤ 8 MiB | 打出来约 0.5 MB（远低于上限） |
 | 依赖指向原作者 | 无运行时依赖；只有官方 `@deepseek-ai/*` 的 optional peer |
 | 不含密钥 / 本机路径 | 飞书表信息只存在本机 `test/smoke.local.json`（已 gitignore），仓库里没有 |
@@ -44,7 +44,7 @@
 3. **只提交这一个文件**，开 PR；PR 描述里写明：
    - 用途：飞书需求/任务表 → AI 全流程（需求分析 / 开发 / 评审 / QA）→ 开发指令；
    - 本机验收：从本仓库安装后能打开「AI Native 工作台」、能读到表；
-   - 验证过的 DSH Desktop 版本与平台（本机为 Desktop 0.2.2 / Windows x64）；
+   - 验证过的宿主版本与平台（官方 DeepSeek Harness 0.2.2-rc.1 / DSH Desktop 0.12.0，Windows x64 均已实测）；
    - 外部依赖：本机 `lark-cli` 已登录（插件不保存飞书凭证）。
 4. CI 检查（manifest、仓库年龄、格式、README 生成）通过后，维护者人工读源码；合并后市场目录更新，条目出现在「插件市场」中。
 
@@ -86,7 +86,7 @@ node test/smoke.mjs        # PASS / WARN / FAIL，默认无 FAIL
 pnpm pack                  # 检查 tgz 体积 < 8 MiB
 ```
 
-也可以在本机把这一个仓库目录填进 DSH Desktop 的「设置 → 插件 → 添加插件」，走一遍真实安装与打开。
+也可以在本机把这一个仓库目录（或 `pnpm pack` 产出的 `.tgz`）填进 **官方 DeepSeek Harness** 的「设置 → 插件 → 添加插件」，走一遍真实安装与打开；DSH Desktop 同样可用。
 
 ## 6. 工作台市场（可选）
 
