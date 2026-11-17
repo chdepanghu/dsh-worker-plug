@@ -671,6 +671,7 @@ check(
 console.log('\n[6b] 客户端加载与组件函数体（无浏览器，用桩 React 跑一遍）')
 const stubReact = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat().filter((child) => child !== null && child !== undefined && child !== false) }),
+  Fragment: Symbol.for('react.fragment'),
   useEffect: () => {},
   useMemo: (factory) => factory(),
   useCallback: (fn) => fn,
@@ -1668,6 +1669,68 @@ check(
   '目录选择器走工作台自己的只读接口（不依赖宿主 pickDirectory）',
   clientSource.includes('api(`/fs/list') && clientSource.includes('function DirectoryPickerDialog'),
 )
+
+// v4.5.3 回归：设置页是「提前 return」的独立分支，弹窗必须也挂在那一层
+const settingsPickerNode = withInjectedState({ 27: { start: 'D:\\' } }, () =>
+  renderComponent(
+    'TableModule',
+    {
+      state: { configured: false, settings: {} },
+      uiWorkspace: {},
+      table: null,
+      view: null,
+      saveView: () => {},
+      reloadState: async () => {},
+      runs: [],
+      handOff: () => {},
+      onUpdateRun: () => {},
+      onOpenTable: () => {},
+      onAddModule: () => {},
+      expertData: null,
+      reloadExperts: async () => {},
+    },
+    'TableModule（设置页 + 已打开目录选择器）',
+  ),
+)
+const settingsPickerText = collectText(settingsPickerNode).join(' ')
+// 节点是 Fragment，子节点是「设置页 + 目录选择器」——组件函数体不会被递归调用，
+// 所以这里断结构而不是文字（文字层已由 DirectoryPickerDialog 自己的用例保证）。
+check(
+  '设置页里点「选择项目目录」→ 设置页与弹窗同时挂在那层 Fragment 上（v4.5.3 回归）',
+  settingsPickerNode?.type === stubReact.Fragment &&
+    settingsPickerNode?.children?.length === 2 &&
+    settingsPickerNode.children[0]?.type === components.SettingsView &&
+    settingsPickerNode.children[1]?.type === components.DirectoryPickerDialog,
+  { type: String(settingsPickerNode?.type), children: (settingsPickerNode?.children ?? []).map((child) => String(child?.type)) },
+)
+check(
+  '设置页（首次配置）也能返回：onCancel 始终传下去',
+  typeof settingsPickerNode?.children?.[0]?.props?.onCancel === 'function',
+)
+
+// v4.5.3：选到没有需求源配置的目录 → 明确提示；并确认认到需求源时不误报
+const settingsNoSource = renderComponent(
+  'SettingsView',
+  { settings: { projectDir: 'D:\\workspace\\other' }, sources: { sources: [], path: '' }, onCancel: () => {}, onSave: () => {} },
+  'SettingsView（目录里没有需求源）',
+)
+const noSourceText = collectText(settingsNoSource).join(' ')
+check(
+  '设置页：没有需求源时提示「看板读不到飞书表」并给出去处',
+  noSourceText.includes('没有 .requirement-sources.json') && noSourceText.includes('返回'),
+  noSourceText.slice(0, 240),
+)
+const settingsWithSource = renderComponent(
+  'SettingsView',
+  {
+    settings: { projectDir: 'D:\\workspace\\demo' },
+    sources: { sources: [{ name: 'demo', tableName: '需求池', baseUrl: 'https://x' }], path: 'D:\\workspace\\demo\\.requirement-sources.json' },
+    onCancel: () => {},
+    onSave: () => {},
+  },
+  'SettingsView（认到需求源）',
+)
+check('设置页：认到需求源时不误报', !collectText(settingsWithSource).join(' ').includes('没有 .requirement-sources.json'))
 
 // 注册：两条宿主路径都要走通
 //  A) 官方 DeepSeek Harness：没有 desktopWorkbenches → 原生 main 主面板 + sidebar.panellist 左栏入口；

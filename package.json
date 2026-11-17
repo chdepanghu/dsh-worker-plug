@@ -1,6 +1,6 @@
 {
   "name": "dsh-requirement-dev-workbench",
-  "version": "4.5.2",
+  "version": "4.5.3",
   "private": false,
   "type": "module",
   "description": "AI Native 工作台：把「拿任务 → 开发 → 验收」串成一条流水线。跨多张飞书多维表格看开发任务与进度，拉取飞书文档信息，用专家/专家团跑完整流程（需求分析 → 代码开发 → 代码评审 → QA 测试），选中本地项目后一键生成开发指令，并可浏览项目/全局 skill 与开发规范。模块可扩展。",
