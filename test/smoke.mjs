@@ -223,6 +223,24 @@ const state0 = await call('GET', '/state')
 check('/state 返回 200 且带 settings', state0.status === 200 && state0.json?.settings !== undefined && state0.json.configured === false)
 check('/state 解析出了 lark-cli 路径', typeof state0.json?.larkCli === 'string' && state0.json.larkCli.length > 0, state0.json?.larkCli)
 
+// v4.5.2：目录浏览接口（官方 Harness 没有系统目录选择器时的兜底）
+const fsRoots = await call('GET', '/fs/list')
+check(
+  '目录浏览：不带路径时先给根目录（Windows 至少一个盘符）',
+  fsRoots.status === 200 && Array.isArray(fsRoots.json?.roots) && fsRoots.json.roots.length > 0 && fsRoots.json.entries.length === 0,
+  fsRoots.json?.roots,
+)
+const fsHere = await call('GET', `/fs/list?path=${encodeURIComponent(process.cwd())}`)
+check(
+  '目录浏览：只回目录（当前仓库里应看到 dsh/lib/test，且不含文件条目）',
+  fsHere.status === 200 && fsHere.json?.ok === true && Array.isArray(fsHere.json.entries) && fsHere.json.entries.length > 0,
+  (fsHere.json?.entries ?? []).map((entry) => entry.name).slice(0, 8),
+)
+check(
+  '目录浏览：文件不是目录，明确拒绝',
+  (await call('GET', `/fs/list?path=${encodeURIComponent(join(process.cwd(), 'package.json'))}`)).json?.ok === false,
+)
+
 const saved = await call('POST', '/settings', { baseInput: `${BASE_TOKEN} ${TABLE_ID}`, projectDir: '' })
 check('/settings 保存并把链接解析成 base_token/table_id', saved.status === 200 && saved.json?.settings?.baseToken === BASE_TOKEN && saved.json?.settings?.tableId === TABLE_ID)
 
@@ -1597,8 +1615,59 @@ check(
   { insertCalls: entryInsertCalls.length, clipboard: entryClipboard.map((text) => String(text).slice(0, 60)) },
 )
 entryInsertAccepts = true
+
+// v4.5.2 回归：点「不用专家（普通交付）」不能再抛（以前 pick 是 null 直接读 .displayName，整条点击失效）
+entryInsertAccepts = true
+entryInsertCalls.length = 0
+entryClipboard.length = 0
+const noneOption = entryOptions.find((node) => collectText(node).join(' ').includes('不用专家'))
+let noneThrew = null
+try {
+  await noneOption?.props?.onClick?.()
+} catch (error) {
+  noneThrew = error
+}
+check(
+  '点「不用专家（普通交付）」不抛错，且不写开场白、不碰剪贴板',
+  Boolean(noneOption) && noneThrew === null && entryInsertCalls.length === 0 && entryClipboard.length === 0,
+  { threw: noneThrew ? String(noneThrew?.message ?? noneThrew) : null, insertCalls: entryInsertCalls.length, clipboard: entryClipboard.length },
+)
+check(
+  '点「不用专家」会把设置改回空（普通交付）',
+  entryFetchCalls.some((call) => call.url.endsWith('/settings') && /"expert"\s*:\s*""/.test(call.body)),
+  entryFetchCalls.map((call) => `${call.url} ${call.body}`).slice(-3),
+)
+check(
+  '专家面板里有「取消」，点了能收起（不选也能关）',
+  collectByType(entryOpen, 'button').some((node) => String(node.props?.className ?? '').includes('rdw-btn') && collectText(node).join(' ').trim() === '取消'),
+  collectByType(entryOpen, 'button').map((node) => collectText(node).join(' ').trim()).filter(Boolean).slice(0, 8),
+)
+
 const entryNoActions = withInjectedState({ 0: true, 1: sampleExpertData }, () => renderComponent('ExpertComposerEntry', {}, '输入框入口（宿主没给 inputActions）'))
 check('宿主没给 inputActions 时照常渲染（入口不崩）', Boolean(entryNoActions?.type))
+
+// v4.5.2：宿主没有系统目录选择器时，用工作台自带的目录浏览器（/fs/list）
+const pickerData = {
+  ok: true,
+  path: 'D:\\workspace',
+  parent: 'D:\\',
+  roots: [{ name: 'D:', path: 'D:\\' }],
+  home: 'C:\\Users\\demo',
+  entries: [{ name: 'demo-project', path: 'D:\\workspace\\demo-project' }],
+}
+const pickerNode = withInjectedState({ 0: pickerData }, () =>
+  renderComponent('DirectoryPickerDialog', { initialPath: 'D:\\workspace', onPick: () => {}, onClose: () => {} }, '目录选择器'),
+)
+const pickerText = collectText(pickerNode).join(' ')
+check(
+  '目录选择器兜底：列出目录、有「用这个目录」与「取消」',
+  pickerText.includes('选择项目目录') && pickerText.includes('demo-project') && pickerText.includes('用这个目录') && pickerText.includes('取消'),
+  pickerText.slice(0, 240),
+)
+check(
+  '目录选择器走工作台自己的只读接口（不依赖宿主 pickDirectory）',
+  clientSource.includes('api(`/fs/list') && clientSource.includes('function DirectoryPickerDialog'),
+)
 
 // 注册：两条宿主路径都要走通
 //  A) 官方 DeepSeek Harness：没有 desktopWorkbenches → 原生 main 主面板 + sidebar.panellist 左栏入口；
@@ -2081,6 +2150,15 @@ check(
 )
 const tmpLeftover = (await readdir(tmpdir())).filter((name) => String(name).startsWith('dsh-rdw-pull-'))
 check('读完就删，临时目录不留 ndjson 垃圾', tmpLeftover.length === 0, tmpLeftover.slice(0, 5))
+
+// v4.5.2：官方 Harness 没有 uiWorkspace.pickDirectory，工作台自带只读目录浏览兜底
+check(
+  '目录浏览接口：/fs/list 只回目录（不读文件内容）',
+  serverSource.includes("route === '/fs/list'") &&
+    serverSource.includes('async function listDirectories') &&
+    serverSource.includes('if (!isDirectory) continue') &&
+    serverSource.includes('directoryRoots()'),
+)
 
 
 const taskSchema = await call('GET', `/fields?table=${encodeURIComponent('task:demo-project')}`)

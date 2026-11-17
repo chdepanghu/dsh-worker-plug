@@ -11,7 +11,7 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { readFile, mkdir, readdir, rm, stat, writeFile, appendFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1222,6 +1222,73 @@ async function fetchFieldSchema(config, settings, explicitTable) {
 function isInside(child, parent) {
   const rel = relative(resolve(parent), resolve(child))
   return rel === '' || (!rel.startsWith('..') && !rel.startsWith(`..${sep}`))
+}
+
+/* ------------------------------------------------------------ 目录浏览 */
+
+/**
+ * 「选择项目目录」的兜底实现。
+ *
+ * 社区版 DSH Desktop 有 uiWorkspace.pickDirectory()，官方 DeepSeek Harness 没有 ——
+ * 那里点按钮只会得到一句「当前宿主没有提供目录选择器」。所以工作台自带一份只读目录浏览：
+ * 客户端弹自己的选择器，服务端只回目录（不回文件内容），任何宿主都能用。
+ */
+
+/** 本机可浏览的根：Windows 枚举真实存在的盘符，其他系统就是 /。 */
+function directoryRoots() {
+  if (process.platform === 'win32') {
+    const roots = []
+    for (const letter of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') {
+      const path = `${letter}:\\`
+      try {
+        if (existsSync(path)) roots.push({ name: `${letter}:`, path })
+      } catch {
+        /* 空光驱 / 断开的网络盘，跳过 */
+      }
+    }
+    return roots
+  }
+  return [{ name: '/', path: '/' }]
+}
+
+async function listDirectories(target) {
+  const roots = directoryRoots()
+  const home = homedir()
+  const raw = String(target ?? '').trim()
+  if (!raw) return { ok: true, path: '', parent: '', roots, home, entries: [] }
+  const resolved = resolve(raw)
+  let info
+  try {
+    info = await stat(resolved)
+  } catch (error) {
+    return { ok: false, path: raw, parent: '', roots, home, entries: [], error: `打不开这个目录：${error?.code ?? error?.message ?? error}` }
+  }
+  if (!info.isDirectory()) {
+    return { ok: false, path: resolved, parent: '', roots, home, entries: [], error: '这是一个文件，不是目录' }
+  }
+  let listing
+  try {
+    listing = await readdir(resolved, { withFileTypes: true })
+  } catch (error) {
+    return { ok: false, path: resolved, parent: '', roots, home, entries: [], error: `读取目录失败：${error?.code ?? error?.message ?? error}` }
+  }
+  const entries = []
+  for (const dirent of listing) {
+    if (entries.length >= 800) break
+    let isDirectory = dirent.isDirectory()
+    if (!isDirectory && dirent.isSymbolicLink()) {
+      try {
+        isDirectory = (await stat(join(resolved, dirent.name))).isDirectory()
+      } catch {
+        isDirectory = false
+      }
+    }
+    if (!isDirectory) continue
+    entries.push({ name: dirent.name, path: join(resolved, dirent.name) })
+  }
+  entries.sort((left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN', { numeric: true, sensitivity: 'base' }))
+  const parent = dirname(resolved) === resolved ? '' : dirname(resolved)
+  return { ok: true, path: resolved, parent, roots, home, entries }
 }
 
 function parseFrontmatter(text) {
@@ -2909,6 +2976,13 @@ export function apply(ctx, config) {
         if (!id) return sendJson(res, 400, { error: '缺少流水线 id' })
         await appendFlow(config, { type: 'remove', id, at: new Date().toISOString() })
         return sendJson(res, 200, { ok: true, items: await readFlows(config) })
+      }
+
+      /* --------------------------------------- 本机目录浏览（选项目目录） */
+
+      if (route === '/fs/list' && req.method === 'GET') {
+        const target = String(url.searchParams.get('path') ?? '').trim()
+        return sendJson(res, 200, await listDirectories(target))
       }
 
       /* --------------------------------------- 项目里 skill 产出的 spec 文档 */
