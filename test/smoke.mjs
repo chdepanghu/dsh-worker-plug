@@ -1597,6 +1597,34 @@ const entrySelected = withInjectedState({ 0: true, 1: { ...sampleExpertData, sel
 )
 check('已选专家时按钮上显示当前是谁', collectText(entrySelected).join(' ').includes('＋ 专家 · 老陈'), collectText(entrySelected).join(' ').slice(0, 80))
 
+// v4.5.5：还没读到数据时说「正在读取」，不能抢答「还没有专家」（第一次打开就是这样错的）
+const entryLoadingState = withInjectedState({ 0: true, 1: null, 4: true }, () =>
+  renderComponent('ExpertComposerEntry', { inputActions: entryInputActions }, '输入框入口（首次打开·读取中）'),
+)
+const entryLoadingText = collectText(entryLoadingState).join(' ')
+check(
+  '第一次打开、数据还没回来：显示「正在读取」而不是「还没有专家」',
+  entryLoadingText.includes('正在读取专家与专家团') && !entryLoadingText.includes('还没有专家'),
+  entryLoadingText.slice(0, 160),
+)
+const entryEmptyState = withInjectedState({ 0: true, 1: { experts: [], teams: [], selected: '' }, 4: false }, () =>
+  renderComponent('ExpertComposerEntry', { inputActions: entryInputActions }, '输入框入口（真的没有专家）'),
+)
+check(
+  '确实没有专家（已读到空列表）时才提示去新建',
+  collectText(entryEmptyState).join(' ').includes('还没有专家'),
+)
+check(
+  '挂载即预读 + 每次打开重读（不再「读过一次就永久缓存」）',
+  clientSource.includes('void load({ force: true })') && clientSource.includes('const force = options?.force === true') && !clientSource.includes('if (data) return data'),
+)
+check(
+  '工作台里换专家会通知输入框入口（同窗口自定义事件）',
+  clientSource.includes("const SETTINGS_EVENT = 'rdw:settings-changed'") &&
+    clientSource.includes('function notifySettingsChanged') &&
+    clientSource.includes('window.addEventListener(SETTINGS_EVENT, onChanged)'),
+)
+
 const expertOption = entryOptions.find((node) => collectText(node).join(' ').includes('老陈'))
 await expertOption?.props?.onClick?.()
 check(
