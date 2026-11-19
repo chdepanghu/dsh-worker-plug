@@ -1149,7 +1149,7 @@ check(
 )
 
 const detailFullStates = []
-const detailFullNode = withInjectedState({ 0: tableData, 1: schemaResult, 5: 'rec1', 23: true }, () => renderComponent('TableModule', { ...tableProps, saveView: (patch) => detailFullStates.push(patch) }, 'TableModule（详情占满）'))
+const detailFullNode = withInjectedState({ 0: tableData, 1: schemaResult, 5: 'rec1', 25: true }, () => renderComponent('TableModule', { ...tableProps, saveView: (patch) => detailFullStates.push(patch) }, 'TableModule（详情占满）'))
 check(
   '点过「占满」：列表让位、拖拽条不出现（占满时没有宽度可拖），并给回「并排」按钮',
   collectByType(detailFullNode, 'div').some((entry) => String(entry.props?.className ?? '').includes('is-detail-full')) &&
@@ -1190,7 +1190,7 @@ check(
   collectByType(stepNode, 'span').filter((entry) => String(entry.props?.className ?? '').includes('ctl')).map((entry) => entry.props?.className),
 )
 const stackedStates = []
-const stackedNode = withInjectedState({ 0: tableData, 1: schemaResult, 5: 'rec1', 24: true }, () => renderComponent('TableModule', { ...tableProps, saveView: (patch) => stackedStates.push(patch) }, 'TableModule（上下排）'))
+const stackedNode = withInjectedState({ 0: tableData, 1: schemaResult, 5: 'rec1', 26: true }, () => renderComponent('TableModule', { ...tableProps, saveView: (patch) => stackedStates.push(patch) }, 'TableModule（上下排）'))
 check(
   '选「上下排」后 split 带 is-stacked（横杠负责高度、竖杠让位），且按钮变成「并排」',
   collectByType(stackedNode, 'div').some((entry) => String(entry.props?.className ?? '').includes('is-stacked')) &&
@@ -1260,8 +1260,11 @@ check(
 )
 const editButtons = collectByType(railFrame, 'button').filter((node) => String(node.props?.className ?? '').includes('rdw-mod-edit'))
 check(
-  '每个表模块旁边都有「改模块名称」入口（外加一个「设置数据来源」入口）',
-  editButtons.length === 2 && String(editButtons[0].props?.title ?? '').includes('改模块名称') && String(editButtons[1].props?.title ?? '').includes('设置这个模块的飞书表格'),
+  '每个表模块旁边都有「改模块名称」「设置数据来源」「设置工作区」入口',
+  editButtons.length === 3 &&
+    String(editButtons[0].props?.title ?? '').includes('改模块名称') &&
+    String(editButtons[1].props?.title ?? '').includes('设置这个模块的飞书表格') &&
+    String(editButtons[2].props?.title ?? '').includes('设置这个模块的工作区'),
   editButtons.map((node) => node.props?.title),
 )
 const renameProbe = (() => {
@@ -1742,27 +1745,35 @@ check(
 )
 
 // v4.5.3 回归：设置页是「提前 return」的独立分支，弹窗必须也挂在那一层
-const settingsPickerNode = withInjectedState({ 27: { start: 'D:\\' } }, () =>
-  renderComponent(
-    'TableModule',
-    {
-      state: { configured: false, settings: {} },
-      uiWorkspace: {},
-      table: null,
-      view: null,
-      saveView: () => {},
-      reloadState: async () => {},
-      runs: [],
-      handOff: () => {},
-      onUpdateRun: () => {},
-      onOpenTable: () => {},
-      onAddModule: () => {},
-      expertData: null,
-      reloadExperts: async () => {},
-    },
-    'TableModule（设置页 + 已打开目录选择器）',
-  ),
-)
+// （useState 序号随 4.5.9 新增的 wsInfo/walletOpen 后移到 29；用窗口扫描避免下次再固定在某个数上）
+const findSettingsPickerNode = () => {
+  for (let index = 25; index <= 40; index += 1) {
+    const node = withInjectedState({ [index]: { start: 'D:\\' } }, () =>
+      renderComponent(
+        'TableModule',
+        {
+          state: { configured: false, settings: {} },
+          uiWorkspace: {},
+          table: null,
+          view: null,
+          saveView: () => {},
+          reloadState: async () => {},
+          runs: [],
+          handOff: () => {},
+          onUpdateRun: () => {},
+          onOpenTable: () => {},
+          onAddModule: () => {},
+          expertData: null,
+          reloadExperts: async () => {},
+        },
+        'TableModule（设置页 + 已打开目录选择器）',
+      ),
+    )
+    if (node?.type === stubReact.Fragment) return node
+  }
+  return null
+}
+const settingsPickerNode = findSettingsPickerNode()
 const settingsPickerText = collectText(settingsPickerNode).join(' ')
 // 节点是 Fragment，子节点是「设置页 + 目录选择器」——组件函数体不会被递归调用，
 // 所以这里断结构而不是文字（文字层已由 DirectoryPickerDialog 自己的用例保证）。
@@ -2735,6 +2746,43 @@ try {
   check('模块来源：坏链接被拒绝且不改动已有来源', (await call('POST', '/module-source', { moduleKey: 'req-a', baseUrl: 'https://example.feishu.cn/base/noTable' })).status === 400 && (await call('GET', '/view')).json.view.modules.find((m) => m.key === 'req-a')?.source?.tableId === 'tblModuleA')
   check('模块来源：不存在的模块返回 404', (await call('POST', '/module-source', { moduleKey: 'nope', baseUrl: moduleA })).status === 404)
   check('模块来源：表列表按模块自己的链接带上那张表（不再借用项目默认表）', (await call('GET', '/tables')).json.tables.some((table) => table.tableId === 'tblModuleA'))
+
+  /* --------- 模块工作区（v4.5.9）：每个模块各存各的目录，改一个不影响别的 --------- */
+  const nilProject = (await call('GET', '/workspace')).json ?? {}
+  check('模块工作区：没给模块时也答得上来（不炸）', nilProject.ok === true && nilProject.found === false && typeof nilProject.projectDir === 'string', nilProject)
+  const twoDirs = await (async () => {
+    const { mkdtemp, mkdir: makeDir } = await import('node:fs/promises')
+    const base = await mkdtemp(join(tmpdir(), 'rdw-ws-'))
+    const dirA = join(base, 'project-a')
+    const dirB = join(base, 'project-b')
+    await makeDir(dirA, { recursive: true })
+    await makeDir(dirB, { recursive: true })
+    return { base, dirA, dirB }
+  })()
+  const wsGlobalBefore = (await call('GET', '/state')).json.settings.projectDir
+  const wsA = await call('POST', '/workspace', { moduleKey: 'req-a', projectDir: twoDirs.dirA })
+  check('模块工作区：给 req-a 设定目录成功', wsA.status === 200 && wsA.json?.ok === true && wsA.json?.projectDir === twoDirs.dirA, wsA.json)
+  const wsReadA = (await call('GET', '/workspace?module=req-a')).json
+  check('模块工作区：req-a 读到自己的目录', wsReadA?.projectDir === twoDirs.dirA && wsReadA?.ownProjectDir === twoDirs.dirA && wsReadA?.inherited === false, wsReadA)
+  const wsReadB = (await call('GET', '/workspace?module=req-b')).json
+  check('模块工作区：req-b 没被带着一起改（仍是跟随当前项目）', wsReadB?.ownProjectDir === '' && wsReadB?.inherited === true && wsReadB?.projectDir !== twoDirs.dirA, wsReadB)
+  const wsGlobalAfter = (await call('GET', '/state')).json.settings.projectDir
+  check('模块工作区：改模块目录不动全局项目设置', wsGlobalAfter === wsGlobalBefore, { before: wsGlobalBefore, after: wsGlobalAfter })
+  const wsB = await call('POST', '/workspace', { moduleKey: 'req-b', projectDir: twoDirs.dirB })
+  const wsAfterBoth = (await call('GET', '/view')).json.view.modules
+  check('模块工作区：两个模块各存各的目录，互不覆盖',
+    wsB.status === 200 &&
+    wsAfterBoth.find((m) => m.key === 'req-a')?.projectDir === twoDirs.dirA &&
+    wsAfterBoth.find((m) => m.key === 'req-b')?.projectDir === twoDirs.dirB,
+    wsAfterBoth.map((m) => [m.key, m.projectDir ?? null]))
+  const wsBad = await call('POST', '/workspace', { moduleKey: 'req-a', projectDir: join(twoDirs.base, 'not-here') })
+  check('模块工作区：不存在的目录被拒绝且不改动已有值', wsBad.status === 400 && (await call('GET', '/workspace?module=req-a')).json.projectDir === twoDirs.dirA, wsBad.json)
+  const wsRel = await call('POST', '/workspace', { moduleKey: 'req-a', projectDir: '.\\relative' })
+  check('模块工作区：相对路径被拒绝', wsRel.status === 400, wsRel.json)
+  const wsUnknown = await call('POST', '/workspace', { moduleKey: 'no-such-module', projectDir: twoDirs.dirA })
+  check('模块工作区：不存在的模块返回 404', wsUnknown.status === 404, wsUnknown.json)
+  const wsClear = await call('POST', '/workspace', { moduleKey: 'req-a', projectDir: '' })
+  check('模块工作区：留空即恢复跟随当前项目', wsClear.status === 200 && (await call('GET', '/workspace?module=req-a')).json.ownProjectDir === '', wsClear.json)
   await setModules([])
 } finally {
   await call('POST', '/settings', sinoSettings)

@@ -3188,6 +3188,51 @@ export function apply(ctx, config) {
         return sendJson(res, result.ok ? 200 : 502, result)
       }
 
+      // 模块级工作区：每个模块自己记项目目录（存 view.json 的模块上），改一个模块不会牵动其他模块。
+      if (route === '/workspace' && req.method === 'GET') {
+        const settings = await readSettings(config)
+        const view = await readView(config)
+        const moduleKey = String(url.searchParams.get('module') ?? '').trim()
+        const module = moduleKey ? view.modules.find((item) => item.key === moduleKey) ?? null : null
+        const projectDir = module ? moduleProjectDir(settings, module) : String(settings.projectDir ?? '')
+        if (moduleKey && !module) return sendJson(res, 404, { ok: false, found: false, error: '没找到这个模块' })
+        const tables = projectDir ? (await listTables(config, { ...settings, projectDir }, view)).tables : []
+        const table = module ? moduleTable(module, { identity: config.identity }) : null
+        return sendJson(res, 200, {
+          ok: true,
+          moduleKey,
+          found: Boolean(module),
+          projectDir,
+          ownProjectDir: String(module?.projectDir ?? ''),
+          inherited: !String(module?.projectDir ?? '').trim(),
+          hasSource: Boolean(await sourceHasTable(projectDir, view)),
+          tableCount: tables.length,
+          moduleSource: table
+            ? { tableId: table.tableId, baseToken: table.baseToken, label: table.label, identity: table.identity, readOnly: table.readOnly }
+            : null,
+        })
+      }
+
+      if (route === '/workspace' && req.method === 'POST') {
+        const settings = await readSettings(config)
+        const body = await readBody(req)
+        const view = await readView(config)
+        const moduleKey = String(body?.moduleKey ?? '').trim()
+        const index = view.modules.findIndex((item) => item.key === moduleKey)
+        if (index < 0) return sendJson(res, 404, { ok: false, error: '没找到这个模块（模块可能已被删除，刷新一下再来）' })
+        const raw = String(body?.projectDir ?? '').trim()
+        if (raw && !/^[A-Za-z]:[\\/]|^\\\\|^\//.test(raw)) {
+          return sendJson(res, 400, { ok: false, error: '请填绝对路径，例如 D:\\workspace\\your-project' })
+        }
+        if (raw && !(await stat(raw).then((info) => info.isDirectory()).catch(() => false))) {
+          return sendJson(res, 400, { ok: false, error: `这个目录不存在：${raw}` })
+        }
+        // 只改这一个模块自己的项目目录；全局项目设置一格都不动。
+        const patch = view.modules.map((item, position) => (position === index ? { ...item, projectDir: raw } : { ...item }))
+        const saved = await writeView(config, { modules: patch })
+        return sendJson(res, 200, { ok: true, moduleKey, projectDir: raw || String(settings.projectDir ?? ''), view: saved })
+      }
+
       // 模块级数据源：每个模块自己记一个链接（存 view.json 的模块上），改了只影响这一个模块。
       if (route === '/module-source' && req.method === 'GET') {
         const settings = await readSettings(config)
@@ -3248,7 +3293,9 @@ export function apply(ctx, config) {
           source.baseUrl = raw
           target.source = source
           target.tableKey = moduleKey
-          target.projectDir = projectDir
+          // setProjectDir：明确要改（对话框保存）。否则只有原本就没有目录时才补默认，免得把用户的合并回来的旧值覆盖掉。
+          if (body?.setProjectDir === true) target.projectDir = String(body?.projectDir ?? '').trim()
+          else if (!String(target.projectDir ?? '').trim()) target.projectDir = projectDir
         }
         const saved = await writeView(config, { modules: patch })
         return sendJson(res, 200, { ok: true, view: saved })
