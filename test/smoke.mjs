@@ -2916,6 +2916,42 @@ check(
   { sliced, unknown: pure.templateSlice(requirementTemplate, []) },
 )
 
+/* v4.5.9：列名跟标准名不一样的表（雀巢这张）也要给齐「标题 / 状态 / 优先级 / 负责人 / 期望完成时间」 */
+const nestleFieldNames = [
+  '需求编号', '页面', '需求|方案|问题', '状态', '优先级', '开发顾问', '实施顾问×',
+  '开发|配置计划结束时间×', '开发|配置计划开始时间×', '上线批次×', '模块', '类型',
+]
+const nestleSlice = pure.templateSlice(requirementTemplate, nestleFieldNames)
+check(
+  '列名不同的表：标题←页面、负责人←开发顾问、期望完成时间←开发|配置计划结束时间×',
+  nestleSlice.listFields.join(',') === '页面,状态,优先级,开发顾问,开发|配置计划结束时间×',
+  nestleSlice,
+)
+check(
+  '卡片同样按别名认列（状态 / 负责人 / 优先级 / 期望完成时间）',
+  nestleSlice.cardFields.join(',') === '状态,开发顾问,优先级,开发|配置计划结束时间×' && nestleSlice.groupField === '状态',
+  nestleSlice.cardFields,
+)
+check(
+  '表里本来就叫标准名的列，不会被别名顶掉',
+  pure.templateColumn(requirementTemplate, '负责人', ['开发顾问', '负责人']) === '负责人' &&
+    pure.templateColumn(requirementTemplate, '负责人', ['开发顾问', '指派']) === '开发顾问' &&
+    pure.templateColumn(requirementTemplate, '负责人', ['优先级']) === '',
+  [
+    pure.templateColumn(requirementTemplate, '负责人', ['开发顾问', '负责人']),
+    pure.templateColumn(requirementTemplate, '负责人', ['开发顾问', '指派']),
+    pure.templateColumn(requirementTemplate, '负责人', ['优先级']),
+  ],
+)
+check(
+  '一张只认得出状态与优先级的表，不会摊出空列（老行为保持）',
+  (() => {
+    const thin = pure.templateSlice(requirementTemplate, ['优先级', '状态'])
+    return thin.listFields.join(',') === '状态,优先级' && thin.cardFields.join(',') === '状态,优先级'
+  })(),
+  pure.templateSlice(requirementTemplate, ['优先级', '状态']),
+)
+
 let capturedTemplateAdd = null
 const moduleDialogNode = withInjectedState({}, () =>
   renderComponent(
