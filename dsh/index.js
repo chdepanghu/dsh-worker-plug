@@ -10,6 +10,7 @@
  * 不持有任何凭证：一律调用用户本机已登录的 lark-cli。
  */
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { readFile, mkdir, readdir, rm, stat, writeFile, appendFile } from 'node:fs/promises'
@@ -22,7 +23,7 @@ export const inject = ['webServer']
 export const Config = Schema.object({
   root: Schema.string().required(),
   larkCli: Schema.string().default(''),
-  identity: Schema.string().default('user'),
+  identity: Schema.string().default('bot'),
   skillsRoots: Schema.array(Schema.string()).default([]),
 })
 
@@ -145,6 +146,8 @@ const DEFAULT_SETTINGS = {
   baseToken: '',
   tableId: '',
   viewId: '',
+  moduleProjectDir: '',
+  manualProjectDir: '',
   titleField: '',
   statusField: '',
   projectField: '',
@@ -231,7 +234,11 @@ function sanitizeTableSlice(slice) {
   return out
 }
 
-/** 一个模块项：key 唯一，指向某张表 + 一种视图；template 记录它是按哪个标准模板建的（可缺省）。 */
+/** 一个模块项：key 唯一，指向某张表 + 一种视图；template 记录它是按哪个标准模板建的（可缺省）。
+ *
+ * v4.5.7 起模块自带 projectDir / source：不填就跟当前项目走；填了就是这个模块自己的项目与表，
+ * 改一个模块的链接不再牵动别的模块（以前所有模块都吃同一个项目的配置）。
+ */
 function sanitizeModule(item, index) {
   if (!item || typeof item !== 'object' || typeof item.tableKey !== 'string' || !item.tableKey) return null
   const out = {
@@ -243,7 +250,115 @@ function sanitizeModule(item, index) {
   // 模板 id 只是标签，认不出就丢掉，不影响模块本身。
   const template = typeof item.template === 'string' ? item.template.trim() : ''
   if (/^[a-z][a-z0-9-]{0,31}$/.test(template)) out.template = template
+  if (typeof item.projectDir === 'string' && item.projectDir.trim()) out.projectDir = item.projectDir.trim()
+  const source = sanitizeModuleSource(item.source)
+  if (source) out.source = source
   return out
+}
+
+/** 模块自带的数据源定义：一张飞书表 + 语义字段，存 view.json，不进 sinfo 配置。 */
+export function sanitizeModuleSource(raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const link = parseBaseInput(raw.baseUrl ?? (raw.baseToken ? `${raw.baseToken} ${raw.tableId ?? ''}` : ''))
+  const baseToken = link.baseToken
+  const tableId = link.tableId
+  if (!baseToken || !tableId) return null
+  const out = { baseUrl: String(raw.baseUrl ?? ''), baseToken, tableId }
+  if (link.viewId) out.viewId = link.viewId
+  for (const key of ['label', 'tableName']) {
+    if (typeof raw[key] === 'string' && raw[key].trim()) out[key] = raw[key].trim()
+  }
+  for (const key of ['titleField', 'statusField']) {
+    if (typeof raw[key] === 'string' && raw[key].trim()) out[key] = raw[key].trim()
+  }
+  if (typeof raw.identity === 'string' && /^(bot|user)$/.test(raw.identity)) out.identity = raw.identity
+  else if (out.identity !== 'user') out.identity = 'bot'
+  if (raw.fields && typeof raw.fields === 'object' && !Array.isArray(raw.fields)) out.fields = raw.fields
+  if (raw.filter && typeof raw.filter === 'object' && !Array.isArray(raw.filter)) out.filter = raw.filter
+  if (Number.isSafeInteger(raw.maxRecords) && raw.maxRecords > 0) out.maxRecords = raw.maxRecords
+  if (raw.readOnly === true) out.readOnly = true
+  return out
+}
+
+/** 模块来源 → 一张可读的表（与项目配置里的表同形，缺省走 bot 身份）。 */
+function moduleTable(module, { identity = 'bot', configPath = '' } = {}) {
+  const source = sanitizeModuleSource(module?.source)
+  if (!source) return null
+  const label = source.label || source.tableName || `模块：${String(module?.title ?? module?.key ?? '').trim()}` || '模块数据源'
+  return tableSpecFrom({
+    key: `module:${module.key}`,
+    label,
+    kind: source.readOnly ? 'task' : 'requirement',
+    sourceName: module.key,
+    entry: {
+      ...source,
+      fields: source.fields ?? (source.titleField || source.statusField
+        ? { title: source.titleField || '', rawRequirement: source.statusField || '' }
+        : null),
+    },
+    configPath: configPath || `${module?.projectDir ? join(module.projectDir, SINO_CONFIG) : '(工作台)'} · 模块来源`,
+    sino: true,
+    readOnly: Boolean(source.readOnly),
+    maxRecords: Number.isSafeInteger(source.maxRecords) && source.maxRecords > 0 ? source.maxRecords : null,
+    defaultIdentity: identity || 'bot',
+  })
+}
+
+/** 模块自己的项目目录（没填就用当前项目）。 */
+function moduleProjectDir(settings, module) {
+  const own = String(module?.projectDir ?? '').trim()
+  return own || String(settings?.projectDir ?? '').trim()
+}
+
+/** /fields?table=…：按表 key 精确取字段（模块自己的表用模块 key）。 */
+const moduleFieldSchema = async (config, settings, tableKey, select = null) => {
+  const view = await readView(config)
+  const module = view.modules.find((item) => item.source && (item.key === tableKey || `module:${item.key}` === tableKey)) ?? null
+  const fallback = select ? await moduleFieldOptions(config, { module, projectDir: module ? moduleProjectDir(settings, module) : '', select }) : null
+  if (!module) {
+    const { table } = await findTable(config, settings, tableKey, view)
+    if (!table) return fallback ?? { configured: false, fields: [], error: '没有找到这张表' }
+    return fetchFieldSchema(config, settings, table, view)
+  }
+  const table = moduleTable(module, { identity: config.identity, configPath: '' })
+  if (!table) return fallback ?? { configured: false, fields: [], error: '没有找到这张表' }
+  const schema = await fetchFieldSchema(config, settings, table, view)
+  const names = (schema?.fields ?? []).map((field) => field.name)
+  if (names.length) return schema
+  // 读飞书失败或这张表暂时没缓存：按传进来的模块 key 把表 id 回给调用方，界面据此判断读的是哪张表。
+  return { ...schema, configured: Boolean(schema?.configured), fields: [], moduleTableId: table.tableId, message: schema?.error || schema?.detail || '还没读到这张表的列名' }
+}
+
+/** /fields?t=模块key&s=字段名：给「这个模块该显示哪些字段」出可选清单。 */
+async function moduleFieldOptions(config, { module = null, projectDir = '', select = null }) {
+  const names = []
+  const add = (name) => {
+    const text = String(name ?? '').trim()
+    if (text && !names.includes(text)) names.push(text)
+  }
+  if (module?.source?.baseUrl) {
+    const link = parseBaseInput(module.source.baseUrl)
+    const cached = await readFile(fieldSchemaFile(config, link.tableId), 'utf8')
+      .then((text) => parseFieldSchema(text))
+      .catch(() => [])
+    for (const field of cached) add(field.name)
+  }
+  const detected = projectDir ? await loadRequirementSources(projectDir) : null
+  for (const source of detected?.sources ?? []) {
+    for (const name of Object.values(source.fields ?? {})) add(name)
+  }
+  return { ok: true, moduleKey: module?.key ?? '', names, selected: select ? String(select) : module?.source?.fields?.rawRequirement ?? '' }
+}
+
+/** 某个模块该看的源配置里有没有表（只查配置，不读飞书）。 */
+async function sourceHasTable(projectDir, view = null) {
+  if (!projectDir) return false
+  const sino = await loadSinoConfig(projectDir)
+  const requirement = await loadRequirementSources(projectDir, sino)
+  if ((requirement?.sources ?? []).some((source) => /^[A-Za-z0-9]+$/.test(parseBaseInput(source.baseUrl).baseToken ?? '') && /^tbl[A-Za-z0-9]+$/.test(parseBaseInput(source.baseUrl).tableId ?? ''))) return true
+  if (await loadProjectManualSource(projectDir)) return true
+  if ((await listTables({ root: projectDir, identity: 'bot', skillsRoots: [], larkCli: '' }, { projectDir })).tables.length) return true
+  return Boolean((view?.modules ?? []).some((module) => module.source && moduleProjectDir({ projectDir }, module) === projectDir && moduleTable(module)?.baseToken))
 }
 
 function viewFile(config) {
@@ -321,34 +436,78 @@ async function writeView(config, patch) {
 
 /* ----------------------------------- 多张飞书表（需求池 + 开发任务表…） */
 
+function projectScope(projectDir) {
+  if (!projectDir) return ''
+  const path = resolve(projectDir)
+  return process.platform === 'win32' ? path.toLowerCase() : path
+}
+
+function moduleSourcesFile(config, projectDir) {
+  const id = createHash('sha256').update(projectScope(projectDir)).digest('hex')
+  return join(config.root, 'module-sources', `${id}.json`)
+}
+
+function manualSourceInScope(settings) {
+  return projectScope(settings.projectDir) === projectScope(settings.manualProjectDir)
+}
+
 const TASK_CONFIG_FILES = ['.dev-task-sources.json', join('doc', 'dev-task-sources.json')]
 
-/** 读项目里已有的开发任务表配置（dev-task-sync 用的那一份）。 */
-export async function loadTaskTables(projectDir) {
+const SINO_CONFIG = 'sino-skill-config.json'
+
+async function readProjectJson(file) {
+  try {
+    return JSON.parse((await readFile(file, 'utf8')).replace(/^\uFEFF/, ''))
+  } catch {
+    return null
+  }
+}
+
+async function loadSinoConfig(projectDir) {
   if (!projectDir) return null
-  for (const rel of TASK_CONFIG_FILES) {
-    const file = join(projectDir, rel)
-    const text = await readFile(file, 'utf8').catch(() => null)
-    if (text === null) continue
-    let parsed
-    try {
-      parsed = JSON.parse(text)
-    } catch {
-      continue
-    }
-    const raw = parsed?.projects && typeof parsed.projects === 'object' ? parsed.projects : {}
-    const names = Object.keys(raw)
-    if (!names.length) continue
-    return {
-      path: file,
-      defaultProject: parsed.defaultProject && raw[parsed.defaultProject] ? parsed.defaultProject : names[0],
-      projects: names.map((name) => ({ name, ...raw[name] })),
-    }
+  const path = join(projectDir, SINO_CONFIG)
+  const config = await readProjectJson(path)
+  if (!config || config.workbench?.enabled === false) return null
+  return { path, config }
+}
+
+function namedSources(section, itemsKey, defaultKey) {
+  const raw = section?.[itemsKey]
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const entries = Object.entries(raw)
+    .filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value))
+    .map(([name, value]) => ({ ...value, name }))
+  if (!entries.length) return null
+  const selected = entries.find((entry) => entry.name === section[defaultKey]) ?? entries[0]
+  return { [defaultKey]: selected.name, [itemsKey]: entries }
+}
+
+async function loadProjectSources(projectDir, sino, skill, legacyFiles, itemsKey, defaultKey) {
+  if (!projectDir) return null
+  const unified = namedSources(sino?.config?.skills?.[skill], itemsKey, defaultKey)
+  if (unified) return { ...unified, path: sino.path, sino: true }
+  for (const rel of legacyFiles) {
+    const path = join(projectDir, rel)
+    const entries = namedSources(await readProjectJson(path), itemsKey, defaultKey)
+    if (entries) return { ...entries, path }
   }
   return null
 }
 
-function tableSpecFrom({ key, label, kind, sourceName, entry, configPath, defaultIdentity }) {
+/** 读项目里已有的开发任务表配置。 */
+export async function loadTaskTables(projectDir, sino = undefined) {
+  return loadProjectSources(projectDir, sino === undefined ? await loadSinoConfig(projectDir) : sino,
+    'dev-task-sync', TASK_CONFIG_FILES, 'projects', 'defaultProject')
+}
+
+/** 项目里显式写的「手动覆盖」：同一项目既可生成配置链接，也可手填（手填优先）。 */
+async function loadProjectManualSource(projectDir) {
+  const parsed = projectDir ? await readProjectJson(join(projectDir, SINO_CONFIG)) : null
+  const entry = parsed?.workbench?.source
+  return entry && typeof entry === 'object' && typeof entry.baseUrl === 'string' ? entry : null
+}
+
+function tableSpecFrom({ key, label, kind, sourceName, entry, configPath, defaultIdentity, sino = false, readOnly = false }) {
   const url = parseBaseInput(entry?.baseUrl ?? '')
   return {
     key,
@@ -361,29 +520,45 @@ function tableSpecFrom({ key, label, kind, sourceName, entry, configPath, defaul
     viewId: url.viewId || '',
     fieldMap: entry?.fields ?? null,
     filter: entry?.filter ?? null,
-    identity: entry?.identity || defaultIdentity || 'user',
+    sino,
+    readOnly,
+    maxRecords: Number.isSafeInteger(entry?.maxRecords) && entry.maxRecords > 0 ? entry.maxRecords : null,
+    identity: entry?.identity || (sino ? 'bot' : '') || defaultIdentity || 'bot',
     configPath: configPath ?? '',
   }
 }
 
 /** 所有可用的表：项目里配了几张就有几张。 */
-export async function listTables(config, settings) {
+export async function listTables(config, settings, view = null) {
   const tables = []
-  const requirement = await loadRequirementSources(settings.projectDir)
+  const sino = await loadSinoConfig(settings.projectDir)
+  const requirement = await loadRequirementSources(settings.projectDir, sino)
   for (const source of requirement?.sources ?? []) {
+    // 模块自己的链接放在前面：这个模块要那张表就用它的，不跟着项目默认走。
+    const pinned = (view?.modules ?? []).find((module) => module.source && module.tableKey === module.key && parseBaseInput(module.source.baseUrl).tableId === parseBaseInput(source.baseUrl).tableId)
     tables.push(
       tableSpecFrom({
         key: `requirement:${source.name}`,
         label: `开发需求 · ${source.name}`,
         kind: 'requirement',
         sourceName: source.name,
-        entry: source,
+        entry: pinned && pinned.key !== source.name ? { ...source, baseUrl: pinned.source.baseUrl, identity: moduleTable(pinned)?.identity ?? source.identity } : source,
         configPath: requirement.path,
+        sino: requirement.sino,
         defaultIdentity: config.identity,
       }),
     )
   }
-  const tasks = await loadTaskTables(settings.projectDir)
+  const manual = await loadProjectManualSource(settings.projectDir)
+  if (manual) {
+    const link = parseBaseInput(manual.baseUrl)
+    tables.push(tableSpecFrom({
+      key: 'requirement:manual', label: '开发需求 · 手填链接', kind: 'requirement', sourceName: 'manual',
+      entry: { ...manual, name: 'manual', tableName: link.tableId }, configPath: join(settings.projectDir, SINO_CONFIG),
+      defaultIdentity: config.identity,
+    }))
+  }
+  const tasks = await loadTaskTables(settings.projectDir, sino)
   for (const project of tasks?.projects ?? []) {
     tables.push(
       tableSpecFrom({
@@ -393,9 +568,34 @@ export async function listTables(config, settings) {
         sourceName: project.name,
         entry: project,
         configPath: tasks.path,
+        sino: tasks.sino,
         defaultIdentity: config.identity,
       }),
     )
+  }
+  // 模块自己配了链接、但项目默认源是另一张表时，这张表也要能被模块自己的字段映射读到。
+  const knownTables = new Map()
+  for (const table of tables) knownTables.set(`${table.baseToken}|${table.tableId}`, table)
+  for (const module of view?.modules ?? []) {
+    const own = moduleTable(module, { identity: config.identity })
+    if (!own?.baseToken || !own.tableId) continue
+    const id = `${own.baseToken}|${own.tableId}`
+    const existing = knownTables.get(id)
+    if (existing) {
+      // 已有同表的项目表：把模块的字段映射叠上去，保证模块按自己的映射读，不串列。
+      existing.fieldMap = own.fieldMap ?? existing.fieldMap
+      existing.identity = own.identity
+      continue
+    }
+    tables.push(own)
+    knownTables.set(id, own)
+  }
+  const generic = namedSources(sino?.config?.skills?.['feishu-task-intake'], 'sources', 'defaultSource')
+  for (const source of generic?.sources ?? []) {
+    tables.push(tableSpecFrom({
+      key: `intake:${source.name}`, label: `通用任务 · ${source.name}`, kind: 'task', sourceName: source.name,
+      entry: source, configPath: sino.path, defaultIdentity: config.identity, sino: true, readOnly: true,
+    }))
   }
   // 不静默丢表：认不出来的表要留下原因，界面上可见（诊断报告 P3）。
   const usable = []
@@ -421,18 +621,37 @@ export async function listTables(config, settings) {
     }
     usable.push(table)
   }
+  if (!usable.length && manualSourceInScope(settings) && /^[A-Za-z0-9]+$/.test(settings.baseToken ?? '') && /^tbl[A-Za-z0-9]+$/.test(settings.tableId ?? '')) {
+    usable.push({
+      key: 'requirement:manual', label: '开发需求 · 手动链接', kind: 'requirement', sourceName: 'manual', tableName: '',
+      baseToken: settings.baseToken, tableId: settings.tableId, viewId: settings.viewId || '',
+      identity: config.identity || 'bot', configPath: '', fieldMap: null, filter: null, readOnly: false,
+    })
+  }
+  const preferred = {
+    'feishu-requirement-intake': requirement?.sino && `requirement:${requirement.defaultSource}`,
+    'dev-task-sync': tasks?.sino && `task:${tasks.defaultProject}`,
+    'feishu-task-intake': generic && `intake:${generic.defaultSource}`,
+  }[sino?.config?.workbench?.defaultPull]
+  const position = usable.findIndex((table) => table.key === preferred)
+  if (position > 0) usable.unshift(...usable.splice(position, 1))
   return { tables: usable, dropped, requirementConfig: requirement?.path ?? '', taskConfig: tasks?.path ?? '' }
 }
 
-export async function findTable(config, settings, key) {
-  const { tables, requirementConfig, taskConfig } = await listTables(config, settings)
+export async function findTable(config, settings, key, view = null) {
+  const { tables, requirementConfig, taskConfig } = await listTables(config, settings, view)
   const wanted = String(key ?? '').trim()
+  const module = wanted ? (view?.modules ?? []).find((item) => item.key === wanted) ?? null : null
+  // 模块自带数据源：先按模块找，找到就用它自己的表和项目，不受当前项目换了影响。
+  let fromModule = module ? moduleTable(module, { identity: config.identity, configPath: requirementConfig }) : null
+  if (fromModule && !fromModule.baseToken) fromModule = null
+  const pool = fromModule ? [fromModule, ...tables.filter((table) => table.key !== fromModule.key)] : tables
   const found = wanted
-    ? tables.find((table) => table.key === wanted) ??
-      tables.find((table) => table.sourceName === wanted) ??
-      tables.find((table) => table.tableId === wanted)
+    ? pool.find((table) => table.key === wanted) ??
+      pool.find((table) => table.sourceName === wanted) ??
+      pool.find((table) => table.tableId === wanted)
     : null
-  return { table: found ?? tables[0] ?? null, tables, requirementConfig, taskConfig }
+  return { table: wanted ? found ?? null : tables[0] ?? null, tables, module, requirementConfig, taskConfig }
 }
 
 const recordCache = new Map()
@@ -494,7 +713,7 @@ async function readRecordsWithFallback({ wrapper, common, outFile, limit = 2000,
     }
   }
   // ndjson 一条都没有：用值矩阵交叉确认「表是空的」还是「通道坏了」。
-  const json = await runLark(wrapper, [...common, '--limit', '200', '--format', 'json'])
+  const json = await runLark(wrapper, [...common, '--limit', String(Math.min(200, limit)), '--format', 'json'])
   if (!json.ok) {
     if (ndjsonError) {
       return { records: [], fetchMode: 'ndjson', warning: '', ndjsonError, failure: { error: '读取飞书多维表格失败', detail: (json.stderr || json.stdout || ndjsonError).trim().slice(0, 1500), command } }
@@ -523,7 +742,7 @@ async function readRecordsWithFallback({ wrapper, common, outFile, limit = 2000,
 }
 
 async function fetchTableRecords(config, table, { fresh = false, limit = 2000 } = {}) {
-  const cacheId = `${config.root}|${table.key}`
+  const cacheId = JSON.stringify([config.root, table.configPath, table.key, table.baseToken, table.tableId, table.viewId, table.identity, limit, table.maxRecords, table.sino && table.filter])
   const hit = recordCache.get(cacheId)
   if (!fresh && hit && Date.now() - hit.at < RECORD_CACHE_MS) return hit.payload
   const larkCli = await resolveLarkCli(config.larkCli)
@@ -534,16 +753,26 @@ async function fetchTableRecords(config, table, { fresh = false, limit = 2000 } 
     wrapper,
     common,
     outFile: larkOutputFile(table.tableId, 'records'),
-    limit,
+    limit: Math.min(limit, table.maxRecords ?? limit),
     command: `lark-cli base +record-list --base-token ${table.baseToken} --table-id ${table.tableId} --as ${table.identity} --format ndjson`,
     matrixReader: (stdout) => matrixToRecords(wrapper, table, stdout),
   })
   if (read.failure) {
     return { ok: false, records: [], error: read.failure.error, detail: read.failure.detail, command: read.failure.command }
   }
-  const payload = { ok: true, records: read.records, fetchMode: read.fetchMode, warning: read.warning, ndjsonError: read.ndjsonError, at: Date.now() }
+  const payload = { ok: true, records: filterSinoRecords(read.records, table), fetchMode: read.fetchMode, warning: read.warning, ndjsonError: read.ndjsonError, at: Date.now() }
   recordCache.set(cacheId, { at: Date.now(), payload })
   return payload
+}
+
+function filterSinoRecords(records, source) {
+  if (!source.sino || !source.filter || typeof source.filter !== 'object' || Array.isArray(source.filter)) return records
+  const rules = Object.entries(source.filter).filter(([, values]) => Array.isArray(values) && values.length)
+  return records.filter((record) => rules.every(([field, values]) => {
+    const cell = (record.fields ?? record)[field]
+    const cells = Array.isArray(cell) ? cell : [cell]
+    return cells.some((value) => values.some((expected) => toPlain(expected) === toPlain(value)))
+  }))
 }
 
 /** 任意一张表的记录 -> 统一结构（标题/状态/负责人等按该表的字段映射取）。 */
@@ -596,7 +825,13 @@ export function summarizeProgress(items, field) {
 
 /** 跨表总览：每张表的总数、按状态字段的进度分布、几条样例。 */
 async function buildOverview(config, settings, { fresh = false } = {}) {
-  const { tables, dropped } = await listTables(config, settings)
+  const view = await readView(config)
+  const { tables, dropped } = await listTables(config, settings, view)
+  // 模块自己配了链接而项目里认不到的，也进总览，否则「总览」和左栏对不上。
+  for (const module of view.modules) {
+    const table = moduleTable(module, { identity: config.identity })
+    if (table?.baseToken && table.tableId && !tables.some((entry) => entry.tableId === table.tableId)) tables.push(table)
+  }
   const out = []
   for (const table of tables) {
     const payload = await fetchTableRecords(config, table, { fresh })
@@ -604,7 +839,9 @@ async function buildOverview(config, settings, { fresh = false } = {}) {
       out.push({ key: table.key, label: table.label, kind: table.kind, tableName: table.tableName, error: payload.error, detail: payload.detail })
       continue
     }
-    const items = payload.records.map((record) => normalizeTableRecord(record, table.fieldMap))
+    const items = payload.records.map((record) => table.kind === 'requirement' && table.sino
+      ? normalizeRecord(record, settings, table.fieldMap)
+      : normalizeTableRecord(record, table.fieldMap))
     const field = table.fieldMap?.status || pickField(items[0]?.fields ?? {}, '', ['状态', 'status', '进度'])
     out.push({
       key: table.key,
@@ -844,50 +1081,66 @@ export function normalizeRecord(record, settings, fieldMap) {
 const SOURCE_CONFIG_FILES = ['.requirement-sources.json', join('doc', 'requirement-sources.json')]
 
 /** 读项目里已有的需求源配置（就是 feishu-requirement-intake 用的那一份）。 */
-export async function loadRequirementSources(projectDir) {
-  if (!projectDir) return null
-  for (const rel of SOURCE_CONFIG_FILES) {
-    const file = join(projectDir, rel)
-    const text = await readFile(file, 'utf8').catch(() => null)
-    if (text === null) continue
-    let parsed
-    try {
-      parsed = JSON.parse(text)
-    } catch {
-      continue
-    }
-    const raw = parsed?.sources && typeof parsed.sources === 'object' ? parsed.sources : {}
-    const names = Object.keys(raw)
-    if (!names.length) continue
-    return {
-      path: file,
-      defaultSource: parsed.defaultSource && raw[parsed.defaultSource] ? parsed.defaultSource : names[0],
-      sources: names.map((name) => ({ name, ...raw[name] })),
-    }
-  }
-  return null
+export async function loadRequirementSources(projectDir, sino = undefined) {
+  return loadProjectSources(projectDir, sino === undefined ? await loadSinoConfig(projectDir) : sino,
+    'feishu-requirement-intake', SOURCE_CONFIG_FILES, 'sources', 'defaultSource')
 }
 
 /** 决定这次读哪张表：优先项目里已有的需求源配置，其次工作台设置里手填的。 */
-export async function resolveRequirementsSource(config, settings) {
+export async function resolveRequirementsSource(config, settings, view = null) {
   const detected = await loadRequirementSources(settings.projectDir)
-  const wanted = settings.sourceName || detected?.defaultSource || ''
-  const chosen = detected?.sources?.find((source) => source.name === wanted) ?? null
+  const manual = await loadProjectManualSource(settings.projectDir)
+  // 记着某个项目配置里没这一项时（比如已经在别的项目里选了源），别扑空，直接退回该项目默认源。
+  const named = settings.sourceName || ''
+  const chosen = detected?.sources?.find((source) => source.name === named) ??
+    (detected?.sources ?? []).find((source) => source.name === detected?.defaultSource) ??
+    null
+  const manualBase = manual ? parseBaseInput(manual.baseUrl) : null
   const fromUrl = parseBaseInput(chosen?.baseUrl ?? '')
-  const baseToken = fromUrl.baseToken || settings.baseToken
-  const tableId = fromUrl.tableId || settings.tableId || chosen?.tableName || ''
-  return {
+  // 设置页填的项目级链接 = 本项目的手动覆盖；手填的 base 里缺表时，才回退到项目配置里的表。
+  // 以前这里不看「手填的是不是别的项目留下的坐标」，会把两个项目的 base/table 拼在一起。
+  const manualHere = Boolean(manualBase?.baseToken)
+  const scoped = !manualHere && !fromUrl.baseToken && !chosen && manualSourceInScope(settings)
+  const baseToken = (manualHere ? manualBase.baseToken : '') || fromUrl.baseToken || (scoped ? settings.baseToken : '')
+  const tableId = (manualHere ? manualBase.tableId || chosen?.tableName : fromUrl.tableId || chosen?.tableName) || (scoped ? settings.tableId : '')
+  const source = {
     label: chosen ? chosen.name : '手动填写',
     sourceName: chosen ? chosen.name : '',
-    configPath: detected?.path ?? '',
+    configPath: manual ? join(settings.projectDir, SINO_CONFIG) : detected?.path ?? '',
     baseToken,
     tableId,
-    viewId: fromUrl.viewId || chosen?.viewId || settings.viewId,
+    viewId: manualHere ? manualBase.viewId : fromUrl.viewId || chosen?.viewId || '',
     fieldMap: chosen?.fields ?? null,
     filter: chosen?.filter ?? null,
-    identity: chosen?.identity || config.identity || 'user',
+    sino: Boolean(chosen && detected.sino),
+    maxRecords: detected?.sino && Number.isSafeInteger(chosen?.maxRecords) && chosen.maxRecords > 0 ? chosen.maxRecords : null,
+    identity: chosen?.identity || config.identity || 'bot',
     configured: Boolean(baseToken && tableId),
   }
+  if (view && !source.configured) {
+    // 只在「当前项目读不出表」时才借模块自己的源：项目配置好的时候，模块跟着项目走（用户换项目会换表）。
+    const module = (view.modules ?? []).find((item) => item.source && (item.tableKey === item.key || item.tableKey === `module:${item.key}`))
+    const table = module ? moduleTable(module, { identity: config.identity }) : null
+    if (table?.baseToken && table.tableId) {
+      return {
+        ...source,
+        label: module.title,
+        sourceName: module.key,
+        moduleKey: module.key,
+        configPath: table.configPath,
+        baseToken: table.baseToken,
+        tableId: table.tableId,
+        viewId: table.viewId,
+        fieldMap: table.fieldMap,
+        filter: table.filter,
+        sino: true,
+        maxRecords: table.maxRecords,
+        identity: table.identity,
+        configured: true,
+      }
+    }
+  }
+  return source
 }
 
 function publicSource(source) {
@@ -1031,6 +1284,7 @@ function publicTable(table) {
     identity: table.identity,
     configPath: table.configPath,
     filter: table.filter,
+    readOnly: table.readOnly,
     fieldMap: table.fieldMap,
   }
 }
@@ -1059,7 +1313,7 @@ async function fetchRequirements(config, settings) {
     wrapper,
     common,
     outFile: larkOutputFile(source.tableId, 'source-records'),
-    limit: 2000,
+    limit: Math.min(2000, source.maxRecords ?? 2000),
     command: `${describeRead(source)} --format ndjson`,
     matrixReader: (stdout) => matrixToRecords(wrapper, source, stdout),
   })
@@ -1068,7 +1322,7 @@ async function fetchRequirements(config, settings) {
   }
   const { records, fetchMode, warning } = read
 
-  const items = records.map((record) => normalizeRecord(record, settings, source.fieldMap))
+  const items = filterSinoRecords(records, source).map((record) => normalizeRecord(record, settings, source.fieldMap))
   return { configured: true, items, count: items.length, source: described, fetchMode, warning }
 }
 
@@ -1090,9 +1344,13 @@ export function buildBatchUpdatePayload(recordId, field, value, fieldType) {
   return { update_records: { [String(recordId)]: { [String(field)]: cellValueFor(value, fieldType) } } }
 }
 
-async function updateRequirementStatus(config, settings, body) {
-  const source = await resolveRequirementsSource(config, settings)
-  if (!source.configured) return { ok: false, error: '还未配置飞书多维表格' }
+async function updateRequirementStatus(config, settings, body, view = null) {
+  const tableKey = String(body?.tableKey ?? '').trim()
+  const source = tableKey
+    ? (await findTable(config, settings, tableKey, view)).table
+    : await resolveRequirementsSource(config, settings, view)
+  if (!source || !(source.baseToken && source.tableId)) return { ok: false, error: '还未配置飞书多维表格或找不到当前表' }
+  if (source.readOnly) return { ok: false, error: '通用任务来源只读，不支持回写飞书' }
   const recordId = String(body?.recordId ?? '').trim()
   const status = String(body?.status ?? '').trim()
   if (!recordId || !status) return { ok: false, error: '缺少记录 ID 或状态值' }
@@ -1170,12 +1428,12 @@ export function parseFieldSchema(stdout) {
     .filter((field) => field.name)
 }
 
-async function fetchFieldSchema(config, settings, explicitTable) {
-  const source = explicitTable ?? (await resolveRequirementsSource(config, settings))
+async function fetchFieldSchema(config, settings, explicitTable, view = null) {
+  const source = explicitTable ?? (await resolveRequirementsSource(config, settings, view))
+  const described = explicitTable ? publicTable(explicitTable) : publicSource(source)
   if (!source.configured && !explicitTable) {
     return { configured: false, fields: [], source: described, message: '还没有配置飞书多维表格' }
   }
-  const described = explicitTable ? publicTable(explicitTable) : publicSource(source)
   const cacheFile = fieldSchemaFile(config, source.tableId)
   const cached = await readFile(cacheFile, 'utf8')
     .then((text) => JSON.parse(text))
@@ -2595,13 +2853,19 @@ export function apply(ctx, config) {
       if (route === '/state' && req.method === 'GET') {
         const settings = await readSettings(config)
         const larkCli = await resolveLarkCli(config.larkCli)
-        const resolved = await resolveRequirementsSource(config, settings)
+        const view = await readView(config)
+        const own = settings.projectDir && view.modules.some((module) => module.source && module.projectDir && moduleProjectDir(settings, module) === settings.projectDir)
+        const resolved = own
+          ? await resolveRequirementsSource(config, settings, view)
+          : await resolveRequirementsSource(config, settings)
         return sendJson(res, 200, {
           settings,
           larkCli,
-          identity: config.identity || 'user',
-          configured: resolved.configured,
+          identity: config.identity || 'bot',
+          configured: resolved.configured || (await listTables(config, settings)).tables.length > 0 || view.modules.some((module) => Boolean(moduleTable(module))),
           source: publicSource(resolved),
+          projectDir: settings.projectDir,
+          modules: view.modules.filter((module) => Boolean(moduleTable(module))).map((module) => ({ key: module.key, title: module.title, projectDir: moduleProjectDir(settings, module) })),
         })
       }
 
@@ -2620,14 +2884,85 @@ export function apply(ctx, config) {
       if (route === '/settings' && req.method === 'POST') {
         const body = await readBody(req)
         const next = { ...body }
-        if (typeof next.baseInput === 'string' && next.baseInput.trim()) {
-          const parsed = parseBaseInput(next.baseInput)
-          if (parsed.baseToken) next.baseToken = parsed.baseToken
-          if (parsed.tableId) next.tableId = parsed.tableId
+        if (typeof next.baseInput === 'string') {
+          const current = await readSettings(config)
+          next.manualProjectDir = typeof next.projectDir === 'string' ? next.projectDir : current.projectDir
+          const input = next.baseInput.trim()
+          if (!input) {
+            next.baseToken = ''
+            next.tableId = ''
+            next.viewId = ''
+          } else {
+            let parsed
+            try {
+              parsed = parseBaseInput(input)
+            } catch {
+              return sendJson(res, 400, { error: '链接格式无效，请重新复制飞书多维表格链接' })
+            }
+            if (/^https?:/i.test(input) && (!parsed.baseToken || !/^tbl[A-Za-z0-9]+$/.test(parsed.tableId))) {
+              return sendJson(res, 400, { error: '请粘贴包含 table=tbl… 的具体数据表链接，而不是多维表格首页链接' })
+            }
+            if (parsed.baseToken) next.baseToken = parsed.baseToken
+            if (parsed.tableId) next.tableId = parsed.tableId
+            if (/^https?:/i.test(input)) next.viewId = parsed.viewId || ''
+            else {
+              const current = await readSettings(config)
+              if (next.baseToken !== current.baseToken || (next.tableId ?? current.tableId) !== current.tableId) next.viewId = ''
+            }
+          }
         }
         delete next.baseInput
+        const currentSettings = await readSettings(config)
+        const nextDir = typeof next.projectDir === 'string' ? next.projectDir : currentSettings.projectDir
+        const dirChanged = projectScope(nextDir) !== projectScope(currentSettings.projectDir)
         const settings = await writeSettings(config, next)
+        // 老项目里没有源配置时，别把工作台的模块丢掉：让每个模块记一份自己的项目目录。
+        if (dirChanged && nextDir) {
+          const view = await readView(config)
+          const pin = view.modules.map((module) => (module.projectDir ? module : { ...module, projectDir: nextDir }))
+          if (pin.some((module, index) => module.projectDir !== view.modules[index].projectDir)) await writeView(config, { modules: pin })
+        }
         return sendJson(res, 200, { settings })
+      }
+
+      if (route === '/project-source' && req.method === 'GET') {
+        const settings = await readSettings(config)
+        const table = await loadProjectManualSource(settings.projectDir)
+        return sendJson(res, 200, { projectDir: settings.projectDir, configPath: settings.projectDir ? join(settings.projectDir, SINO_CONFIG) : '', baseUrl: table?.baseUrl ?? '' })
+      }
+
+      if (route === '/project-source' && req.method === 'POST') {
+        const body = await readBody(req)
+        const settings = await readSettings(config)
+        if (!settings.projectDir || projectScope(body?.projectDir) !== projectScope(settings.projectDir)) {
+          return sendJson(res, 409, { error: '请先在设置页选项目目录；如果刚切换项目，请重新打开设置' })
+        }
+        const baseUrl = String(body?.baseUrl ?? '').trim()
+        if (baseUrl) {
+          let parsed
+          try {
+            const link = new URL(baseUrl)
+            if (['http:', 'https:'].includes(link.protocol)) parsed = parseBaseInput(link.href)
+          } catch { /* Invalid URL or malformed encoded query. */ }
+          if (!parsed?.baseToken || !/^tbl[A-Za-z0-9]+$/.test(parsed.tableId)) {
+            return sendJson(res, 400, { error: '请粘贴包含 table=tbl… 的完整飞书多维表格链接' })
+          }
+        }
+        const path = join(settings.projectDir, SINO_CONFIG)
+        const previous = await readProjectJson(path)
+        if (!previous) return sendJson(res, 409, { error: '项目里还没有 sino-skill-config.json，请先配置项目需求源' })
+        const next = { ...previous }
+        let changed = false
+        if (baseUrl) {
+          next.workbench = { ...(previous.workbench ?? {}), source: { baseUrl } }
+          changed = true
+        } else if (previous.workbench && 'source' in previous.workbench) {
+          const { source: removed, ...workbench } = previous.workbench
+          next.workbench = workbench
+          changed = true
+        }
+        if (changed) await writeFile(path, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+        return sendJson(res, 200, { ok: true, baseUrl })
       }
 
       if (route === '/sources' && req.method === 'GET') {
@@ -2650,20 +2985,57 @@ export function apply(ctx, config) {
         })
       }
 
+      const parseRequestUrl = () => {
+        try {
+          return new URL(req.url, 'http://127.0.0.1')
+        } catch {
+          return null
+        }
+      }
       if (route === '/fields' && req.method === 'GET') {
         const settings = await readSettings(config)
-        const tableKey = url.searchParams.get('table')
-        if (tableKey) {
-          const { table } = await findTable(config, settings, tableKey)
-          if (!table) return sendJson(res, 404, { error: '没有找到这张表' })
-          return sendJson(res, 200, await fetchFieldSchema(config, settings, table))
+        const requestUrl = parseRequestUrl()
+        const tableKey = requestUrl?.searchParams.get('table') ?? ''
+        const wanted = String(requestUrl?.searchParams.get('t') ?? '').trim()
+        const select = requestUrl?.searchParams.get('s') ?? null
+        if (wanted) {
+          const view = await readView(config)
+          const module = view.modules.find((item) => item.key === wanted) ?? null
+          const projectDir = module ? moduleProjectDir(settings, module) : String(settings.projectDir ?? '')
+          const table = moduleTable(module, { identity: config.identity, configPath: '' })
+          let cached = []
+          if (table?.tableId) {
+            cached = await readFile(fieldSchemaFile(config, table.tableId), 'utf8')
+              .then((text) => parseFieldSchema(text))
+              .catch(() => [])
+          }
+          const names = []
+          const add = (name) => {
+            const text = String(name ?? '').trim()
+            if (text && !names.includes(text)) names.push(text)
+          }
+          if (!cached.length) {
+            const schema = table ? await fetchFieldSchema(config, settings, table, view) : null
+            for (const field of schema?.fields ?? []) add(field.name)
+          }
+          for (const field of cached) add(field.name)
+          const detected = projectDir ? await loadRequirementSources(projectDir) : null
+          for (const source of detected?.sources ?? []) {
+            for (const name of Object.values(source.fields ?? {})) add(name)
+          }
+          return sendJson(res, 200, { ok: true, moduleKey: module?.key ?? '', names, selected: String(select ?? '') })
         }
-        return sendJson(res, 200, await fetchFieldSchema(config, settings))
+        if (!tableKey) {
+          const { table } = await findTable(config, settings, '', view)
+          if (!table) return sendJson(res, 200, { configured: false, fields: [], source: publicSource(await resolveRequirementsSource(config, settings, view)), message: '还没有配置飞书多维表格' })
+          return sendJson(res, 200, await fetchFieldSchema(config, settings, table, view))
+        }
+        return sendJson(res, 200, await moduleFieldSchema(config, settings, tableKey, select))
       }
 
       if (route === '/tables' && req.method === 'GET') {
         const settings = await readSettings(config)
-        const { tables, dropped } = await listTables(config, settings)
+        const { tables, dropped } = await listTables(config, settings, await readView(config))
         return sendJson(res, 200, {
           projectDir: settings.projectDir,
           dropped,
@@ -2676,6 +3048,9 @@ export function apply(ctx, config) {
             tableId: table.tableId,
             identity: table.identity,
             configPath: table.configPath,
+            moduleKey: table.moduleKey,
+            baseUrl: table.baseUrl,
+            readOnly: table.readOnly,
             fields: table.fieldMap,
             filter: table.filter,
           })),
@@ -2685,13 +3060,15 @@ export function apply(ctx, config) {
       if (route === '/records' && req.method === 'GET') {
         const settings = await readSettings(config)
         const fresh = url.searchParams.get('fresh') === '1'
-        const { table, tables } = await findTable(config, settings, url.searchParams.get('table'))
+        const { table, tables } = await findTable(config, settings, url.searchParams.get('table'), await readView(config))
         if (!table) return sendJson(res, 200, { configured: false, items: [], message: '项目里还没有配到飞书表' })
         const payload = await fetchTableRecords(config, table, { fresh })
         if (!payload.ok) {
           return sendJson(res, 200, { configured: true, items: [], table: publicTable(table), error: payload.error, detail: payload.detail, command: payload.command })
         }
-        const items = payload.records.map((record) => normalizeTableRecord(record, table.fieldMap))
+        const items = payload.records.map((record) => table.kind === 'requirement' && table.sino
+          ? normalizeRecord(record, settings, table.fieldMap)
+          : normalizeTableRecord(record, table.fieldMap))
         return sendJson(res, 200, {
           configured: true,
           table: publicTable(table),
@@ -2759,7 +3136,18 @@ export function apply(ctx, config) {
       }
 
       if (route === '/view' && req.method === 'GET') {
-        return sendJson(res, 200, { view: await readView(config) })
+        const view = await readView(config)
+        // 模块级数据源的探测结果直接带回去：左栏按它标出「自己的项目/项目里没配好」，前端不必再猜。
+        const settings = await readSettings(config)
+        for (const module of view.modules) {
+          if (!module.source) continue
+          const table = moduleTable(module, { identity: config.identity })
+          module.projectDir = moduleProjectDir(settings, module)
+          module.sourceResolved = table
+            ? { label: table.label, tableId: table.tableId, baseToken: table.baseToken, identity: table.identity, readOnly: table.readOnly, missing: !(table.baseToken && table.tableId) }
+            : { label: '', tableId: '', baseToken: '', identity: '', readOnly: false, missing: true }
+        }
+        return sendJson(res, 200, { view })
       }
 
       if (route === '/view' && req.method === 'POST') {
@@ -2772,13 +3160,15 @@ export function apply(ctx, config) {
         const tableKey = url.searchParams.get('table')
         if (!tableKey) return sendJson(res, 200, await fetchRequirements(config, settings))
         const fresh = url.searchParams.get('fresh') === '1'
-        const { table, tables } = await findTable(config, settings, tableKey)
+        const { table, tables } = await findTable(config, settings, tableKey, await readView(config))
         if (!table) return sendJson(res, 200, { configured: false, items: [], message: '没有找到这张表（项目里还没配到）' })
         const payload = await fetchTableRecords(config, table, { fresh })
         if (!payload.ok) {
           return sendJson(res, 200, { configured: true, items: [], source: publicTable(table), error: payload.error, detail: payload.detail, command: payload.command })
         }
-        const items = payload.records.map((record) => normalizeTableRecord(record, table.fieldMap))
+        const items = payload.records.map((record) => table.kind === 'requirement' && table.sino
+          ? normalizeRecord(record, settings, table.fieldMap)
+          : normalizeTableRecord(record, table.fieldMap))
         return sendJson(res, 200, {
           configured: true,
           source: publicTable(table),
@@ -2793,8 +3183,75 @@ export function apply(ctx, config) {
       if (route === '/requirement/status' && req.method === 'POST') {
         const settings = await readSettings(config)
         const body = await readBody(req)
-        const result = await updateRequirementStatus(config, settings, body)
+        const view = await readView(config)
+        const result = await updateRequirementStatus(config, settings, body, view)
         return sendJson(res, result.ok ? 200 : 502, result)
+      }
+
+      // 模块级数据源：每个模块自己记一个链接（存 view.json 的模块上），改了只影响这一个模块。
+      if (route === '/module-source' && req.method === 'GET') {
+        const settings = await readSettings(config)
+        const view = await readView(config)
+        const moduleKey = String(url.searchParams.get('module') ?? '').trim()
+        const module = view.modules.find((item) => item.key === moduleKey) ?? null
+        const table = module ? moduleTable(module, { identity: config.identity }) : null
+        return sendJson(res, 200, {
+          ok: true,
+          moduleKey,
+          found: Boolean(module),
+          projectDir: module ? moduleProjectDir(settings, module) : settings.projectDir,
+          ownProjectDir: String(module?.projectDir ?? ''),
+          fields: module?.source?.fields ?? null,
+          baseUrl: module?.source?.baseUrl ?? (table ? `${table.baseToken} ${table.tableId}` : ''),
+          tableId: table?.tableId ?? '',
+          identity: table?.identity ?? config.identity ?? 'bot',
+          readOnly: Boolean(table?.readOnly),
+          resolved: table
+            ? { label: table.label, baseToken: table.baseToken, tableId: table.tableId, tableName: table.tableName, configPath: table.configPath }
+            : null,
+        })
+      }
+
+      if (route === '/module-source' && req.method === 'POST') {
+        const settings = await readSettings(config)
+        const body = await readBody(req)
+        const view = await readView(config)
+        const moduleKey = String(body?.moduleKey ?? '').trim()
+        const index = view.modules.findIndex((item) => item.key === moduleKey)
+        if (index < 0) return sendJson(res, 404, { ok: false, error: '没找到这个模块（模块可能已被删除，刷新一下再来）' })
+        const raw = String(body?.baseUrl ?? '').trim()
+        const patch = view.modules.map((item) => ({ ...item }))
+        const target = patch[index]
+        if (!raw) {
+          delete target.source
+          delete target.projectDir
+        } else {
+          if (/^https?:/i.test(raw)) {
+            const parsed = parseBaseInput(raw)
+            if (!parsed.baseToken || !/^tbl[A-Za-z0-9]+$/.test(parsed.tableId)) {
+              return sendJson(res, 400, { ok: false, error: '请粘贴包含 table=tbl… 的具体数据表链接，而不是多维表格首页链接' })
+            }
+          }
+          const previous = sanitizeModuleSource(target.source)
+          // 保留这个模块上一张表的读取身份/字段映射/筛选，只把链接换成新的。
+          // 注意：手填的链接默认按项目习惯用 bot 身份读（不再沿用配置里可能残留的 user）。
+          const projectDir = String(body?.projectDir ?? '').trim() || String(target.projectDir ?? '').trim() || String(settings.projectDir ?? '').trim()
+          const fields = body?.fields && typeof body.fields === 'object' && !Array.isArray(body.fields) ? body.fields : previous?.fields ?? null
+          const source = sanitizeModuleSource({
+            ...(previous ?? {}),
+            fields,
+            identity: previous?.identity || 'bot',
+            baseUrl: raw,
+            tableName: previous?.baseUrl && previous.baseUrl !== raw ? '' : previous?.tableName ?? '',
+          })
+          if (!source) return sendJson(res, 400, { ok: false, error: '认不出这个链接里的多维表格，请贴完整的多维表格链接（含 ?table=tbl…）' })
+          source.baseUrl = raw
+          target.source = source
+          target.tableKey = moduleKey
+          target.projectDir = projectDir
+        }
+        const saved = await writeView(config, { modules: patch })
+        return sendJson(res, 200, { ok: true, view: saved })
       }
 
       if (route === '/skills' && req.method === 'GET') {

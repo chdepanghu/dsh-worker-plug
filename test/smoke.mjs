@@ -706,6 +706,36 @@ check(
 
 const pure = clientModule?.__pure ?? {}
 const components = clientModule?.__components ?? {}
+
+// 冷启动回归：不挂载 BusinessPanel，单独渲染输入框入口也必须安装样式。
+// 这里只测试样式注入副作用及幂等性，不将 DOM 桩作为视觉验收证据。
+const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+const injectedStyleNodes = []
+Object.defineProperty(globalThis, 'document', {
+  configurable: true,
+  value: {
+    getElementById: (id) => injectedStyleNodes.find((node) => node.id === id) ?? null,
+    createElement: (tag) => ({ tagName: tag }),
+    head: { appendChild: (node) => injectedStyleNodes.push(node) },
+  },
+})
+try {
+  stateCursor = 0
+  components.ExpertComposerEntry({})
+  check('冷启动直接打开专家入口就注入专家样式，无需先开工作台',
+    injectedStyleNodes.length === 1 &&
+    injectedStyleNodes[0].id === 'rdw-business-panel-styles' &&
+    injectedStyleNodes[0].textContent.includes('.rdw-expert-pop{') &&
+    injectedStyleNodes[0].textContent.includes('.rdw-expert-option{'))
+  stateCursor = 0
+  components.ExpertComposerEntry({})
+  check('专家入口重复渲染不重复插入样式', injectedStyleNodes.length === 1)
+} finally {
+  stateCursor = 0
+  if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument)
+  else delete globalThis.document
+}
+
 const sampleItem = {
   id: 'rec1',
   title: '技能标签支持 Excel 批量导入',
@@ -1230,8 +1260,8 @@ check(
 )
 const editButtons = collectByType(railFrame, 'button').filter((node) => String(node.props?.className ?? '').includes('rdw-mod-edit'))
 check(
-  '每个表模块旁边都有「改模块名称」入口',
-  editButtons.length === 1 && String(editButtons[0].props?.title ?? '').includes('改模块名称'),
+  '每个表模块旁边都有「改模块名称」入口（外加一个「设置数据来源」入口）',
+  editButtons.length === 2 && String(editButtons[0].props?.title ?? '').includes('改模块名称') && String(editButtons[1].props?.title ?? '').includes('设置这个模块的飞书表格'),
   editButtons.map((node) => node.props?.title),
 )
 const renameProbe = (() => {
@@ -1758,7 +1788,7 @@ const settingsNoSource = renderComponent(
 const noSourceText = collectText(settingsNoSource).join(' ')
 check(
   '设置页：没有需求源时提示「看板读不到飞书表」并给出去处',
-  noSourceText.includes('没有 .requirement-sources.json') && noSourceText.includes('返回'),
+  noSourceText.includes('没有检测到项目需求源') && noSourceText.includes('返回'),
   noSourceText.slice(0, 240),
 )
 const settingsWithSource = renderComponent(
@@ -1771,7 +1801,7 @@ const settingsWithSource = renderComponent(
   },
   'SettingsView（认到需求源）',
 )
-check('设置页：认到需求源时不误报', !collectText(settingsWithSource).join(' ').includes('没有 .requirement-sources.json'))
+check('设置页：认到需求源时不误报', !collectText(settingsWithSource).join(' ').includes('没有检测到项目需求源'))
 
 // 注册：两条宿主路径都要走通
 //  A) 官方 DeepSeek Harness：没有 desktopWorkbenches → 原生 main 主面板 + sidebar.panellist 左栏入口；
@@ -2599,6 +2629,116 @@ check('认不出的表不静默丢弃：直接写表名会给出原因', await (
   const result = await listTables({ root, identity: 'user', skillsRoots: [], larkCli: '' }, { projectDir: dir })
   return result.tables.length === 1 && result.dropped.length === 1 && result.dropped[0].label === '开发需求 · 写错表' && /不像飞书表 id/.test(result.dropped[0].reason)
 })())
+
+console.log('\n[Sino] 项目统一飞书配置')
+const sinoDir = join(root, 'sino-project')
+await mkdir(sinoDir, { recursive: true })
+const sinoUrl = process.env.RDW_TEST_SINO_URL || `https://example.feishu.cn/base/${BASE_TOKEN}?table=tblSinoReq`
+const sinoEntry = { baseUrl: sinoUrl, tableName: '开发和配置清单', identity: 'bot', maxRecords: 200, filter: { 状态: ['待开始'] }, fields: { title: '页面', status: '状态', rawRequirement: '需求|方案|问题' } }
+const sinoConfig = { version: 1, skills: {
+  'feishu-requirement-intake': { defaultSource: 'adjustments', sources: { adjustments: sinoEntry } },
+  'dev-task-sync': { defaultProject: '', projects: {} },
+  'feishu-task-intake': { defaultSource: '', sources: {} },
+}, workbench: { enabled: true, defaultPull: 'feishu-task-intake', outputFormat: 'json' } }
+const sinoFile = join(sinoDir, 'sino-skill-config.json')
+await writeFile(sinoFile, '\uFEFF' + JSON.stringify(sinoConfig), 'utf8')
+const sinoSettings = (await call('GET', '/state')).json.settings
+try {
+  const manualDir = join(root, 'manual-project')
+  await mkdir(manualDir, { recursive: true })
+  const manualLink = `https://example.feishu.cn/base/${BASE_TOKEN}?table=tblManualSource&view=vewManualSource`
+  const manualSave = await call('POST', '/settings', { projectDir: manualDir, baseInput: manualLink, tableId: 'tblStale' })
+  const manualTable = (await call('GET', '/tables')).json.tables[0]
+  check('手填链接：无项目源时保存为工作台模块，链接中的表覆盖旧表', manualSave.status === 200 && manualTable?.key === 'requirement:manual' && manualTable?.tableId === 'tblManualSource' && manualSave.json?.settings?.viewId === 'vewManualSource')
+  const invalidLink = await call('POST', '/settings', { baseInput: `https://example.feishu.cn/base/${BASE_TOKEN}` })
+  check('手填链接：缺少表参数时不覆盖已保存的表和视图', invalidLink.status === 400 && (await call('GET', '/state')).json.settings.viewId === 'vewManualSource')
+  if (process.env.RDW_TEST_SINO_URL) {
+    await call('POST', '/settings', { baseInput: process.env.RDW_TEST_SINO_URL })
+    const manual = (await call('GET', '/requirements?table=requirement:manual&fresh=1')).json
+    const expected = process.env.RDW_TEST_SINO_URL
+    check('手填链接：数据源与粘贴链接指向同一张表', manual.source?.tableId === parseBaseInput(expected).tableId && manual.source?.key === 'requirement:manual')
+  }
+  await call('POST', '/settings', { projectDir: sinoDir, sourceName: 'stale-project-source' })
+  const state = (await call('GET', '/state')).json
+  const sources = (await call('GET', '/sources')).json
+  const tables = (await call('GET', '/tables')).json.tables
+  check('Sino：空通用任务段不挡住需求表，旧选择回退到新项目默认源', state.configured && state.source.sourceName === 'adjustments' && sources.selected === 'adjustments' && tables[0]?.key === 'requirement:adjustments')
+  check('Sino：复用项目配置路径、机器人身份、字段和筛选', tables[0]?.configPath === sinoFile && tables[0]?.identity === 'bot' && tables[0]?.fields?.rawRequirement === '需求|方案|问题' && tables[0]?.filter?.状态?.[0] === '待开始')
+  if (process.env.RDW_TEST_SINO_URL) {
+    const result = (await call('GET', '/requirements?table=requirement:adjustments&fresh=1')).json
+    check('Sino：真实飞书需求模块读取且只显示待开始', !result.error && result.count > 0 && result.items.every((item) => item.status === '待开始') && result.count <= 200, { count: result.count, mode: result.fetchMode, error: result.error, detail: result.detail })
+  }
+  sinoConfig.skills['dev-task-sync'].projects.dev = { ...sinoEntry, baseUrl: `https://example.feishu.cn/base/${BASE_TOKEN}?table=tblDevTask` }
+  sinoConfig.skills['feishu-task-intake'].sources.queue = { ...sinoEntry, baseUrl: `https://example.feishu.cn/base/${BASE_TOKEN}?table=tblSinoQueue` }
+  await writeFile(sinoFile, JSON.stringify(sinoConfig))
+  const expanded = (await call('GET', '/tables')).json.tables
+  check('Sino：三种数据源都有独立模块，defaultPull 对应的表优先', expanded.map((table) => table.key).join(',') === 'intake:queue,requirement:adjustments,task:dev' && expanded[0].readOnly === true)
+  const denied = await call('POST', '/requirement/status', { tableKey: 'intake:queue', recordId: 'recPlaceholder', status: '已完成' })
+  check('Sino：通用任务拒绝回写，不调用飞书', denied.status !== 200 && denied.json?.error?.includes('只读'))
+  const stale = await call('GET', '/requirements?table=requirement:removed')
+  check('不存在的模块不回退到其他表', stale.json?.configured === false)
+  delete sinoConfig.skills['feishu-requirement-intake']
+  await writeFile(sinoFile, JSON.stringify(sinoConfig))
+  check('Sino：仅任务项目仍可进入模块', (await call('GET', '/state')).json.configured === true)
+  await writeFile(join(sinoDir, '.requirement-sources.json'), JSON.stringify({ sources: { legacy: sinoEntry } }))
+  check('Sino：缺需求段时兼容旧配置', (await call('GET', '/tables')).json.tables.some((table) => table.key === 'requirement:legacy'))
+  sinoConfig.workbench.enabled = false
+  await writeFile(sinoFile, JSON.stringify(sinoConfig))
+  check('Sino：显式禁用不读取统一配置，不影响旧文件', (await call('GET', '/tables')).json.tables.map((table) => table.key).join(',') === 'requirement:legacy')
+  const writeProject = (projectDir, baseUrl) => call('POST', '/project-source', { projectDir, baseUrl })
+  const requirementUrl = `https://example.feishu.cn/base/${BASE_TOKEN}?table=tblProjectA&view=vewProjectA`
+  await call('POST', '/settings', { projectDir: sinoDir })
+  check('项目需求来源：设置页保存链接后按项目生成模块', (await writeProject(sinoDir, requirementUrl)).status === 200 && (await call('GET', '/tables')).json.tables.some((table) => table.key === 'requirement:manual' && table.tableId === 'tblProjectA'))
+  check('项目需求来源：手填链接只用于本项目，读取身份为环境配置（默认 bot）', await (async () => {
+    const project = join(root, 'manual-only')
+    await mkdir(project, { recursive: true })
+    const result = await listTables({ root, skillsRoots: [], larkCli: '' }, { projectDir: project, baseToken: BASE_TOKEN, tableId: 'tblManualOnly', manualProjectDir: project })
+    return result.tables.length === 1 && result.tables[0].key === 'requirement:manual' && result.tables[0].identity !== 'user'
+  })())
+  check('项目需求来源：设置页可回读本项目的链接', (await call('GET', '/project-source')).json?.baseUrl === requirementUrl)
+  check('项目需求来源：无效链接被拒绝且不改动配置', (await writeProject(sinoDir, 'https://example.feishu.cn/base/noTable')).status === 400 && (await call('GET', '/project-source')).json?.baseUrl === requirementUrl)
+  await call('POST', '/settings', { projectDir: manualDir })
+  check('项目需求来源：换项目后不串用上一项目的链接', !(await call('GET', '/project-source')).json?.baseUrl)
+  check('项目需求来源：没有配置的项目拒绝写入', (await writeProject(manualDir, requirementUrl)).status === 409)
+  await call('POST', '/settings', { projectDir: sinoDir })
+  check('项目需求来源：清除后回到项目里的需求源', (await writeProject(sinoDir, '')).status === 200 && !(await call('GET', '/tables')).json.tables.some((table) => table.key === 'requirement:manual'))
+
+  // v4.5.7 模块级数据源：链接挂在模块上，改一个模块不牵动别的模块/别的项目。
+  const moduleA = `https://example.feishu.cn/base/${BASE_TOKEN}?table=tblModuleA`
+  const moduleB = `https://example.feishu.cn/base/${BASE_TOKEN}?table=tblModuleB`
+  const setModules = (modules) => call('POST', '/view', { modules })
+  await call('POST', '/settings', { projectDir: sinoDir })
+  const seedModules = [
+    { key: 'req-a', tableKey: 'requirement:adjustments', title: '开发需求 · A', view: 'list' },
+    { key: 'req-b', tableKey: 'requirement:adjustments', title: '开发需求 · B', view: 'list' },
+  ]
+  check('模块来源：模块没配来源时照旧跟随项目配置', (await setModules(seedModules)).status === 200 && (await call('GET', '/view')).json.view.modules.every((module) => !module.source))
+  const before = (await call('GET', '/view')).json.view.modules
+  const setA = await call('POST', '/module-source', { moduleKey: 'req-a', baseUrl: moduleA })
+  const stored = (await call('GET', '/view')).json.view.modules
+  check('模块来源：保存模块自己的链接', setA.status === 200 && stored.find((m) => m.key === 'req-a')?.source?.tableId === 'tblModuleA', { status: setA.status, before: JSON.stringify(before.map((m) => [m.key, Boolean(m.source)])), stored: JSON.stringify(stored.map((m) => [m.key, m.source?.tableId ?? null])) })
+  const afterA = (await call('GET', '/view')).json.view.modules
+  check('模块来源：只改本模块，另一模块跟随项目配置不变', setA.status === 200 && afterA.find((m) => m.key === 'req-a')?.source?.tableId === 'tblModuleA' && !afterA.find((m) => m.key === 'req-b')?.source)
+  const readA = (await call('GET', '/fields?table=module:req-a')).json
+  check('模块来源：模块用自己那张表读字段，不借用项目里别的表', readA?.source?.tableId === 'tblModuleA' || readA?.moduleTableId === 'tblModuleA', JSON.stringify(readA).slice(0, 300))
+  const readByModuleKey = (await call('GET', '/fields?table=req-a')).json
+  check('模块来源：按模块 key 也能读到这张表（界面用模块 key 请求字段）', readByModuleKey?.source?.tableId === 'tblModuleA' || readByModuleKey?.moduleTableId === 'tblModuleA', readByModuleKey?.error)
+  const sourceOfA = (await call('GET', '/module-source?module=req-a')).json
+  check('模块来源：可回读本模块的链接与解析结果', sourceOfA?.baseUrl === moduleA && sourceOfA?.resolved?.tableId === 'tblModuleA')
+  check('模块来源：别的模块没有链接', (await call('GET', '/module-source?module=req-b')).json?.baseUrl === '')
+  const setB = await call('POST', '/module-source', { moduleKey: 'req-b', baseUrl: moduleB })
+  const afterB = (await call('GET', '/view')).json.view.modules
+  check('模块来源：再改第二个模块，第一个模块的链接不受影响', setB.status === 200 && afterB.find((m) => m.key === 'req-a')?.source?.tableId === 'tblModuleA' && afterB.find((m) => m.key === 'req-b')?.source?.tableId === 'tblModuleB')
+  const cleared = await call('POST', '/module-source', { moduleKey: 'req-b', baseUrl: '' })
+  const afterClear = (await call('GET', '/view')).json.view.modules
+  check('模块来源：留空即恢复跟随项目配置', cleared.status === 200 && !afterClear.find((m) => m.key === 'req-b')?.source && afterClear.find((m) => m.key === 'req-a')?.source?.tableId === 'tblModuleA')
+  check('模块来源：坏链接被拒绝且不改动已有来源', (await call('POST', '/module-source', { moduleKey: 'req-a', baseUrl: 'https://example.feishu.cn/base/noTable' })).status === 400 && (await call('GET', '/view')).json.view.modules.find((m) => m.key === 'req-a')?.source?.tableId === 'tblModuleA')
+  check('模块来源：不存在的模块返回 404', (await call('POST', '/module-source', { moduleKey: 'nope', baseUrl: moduleA })).status === 404)
+  check('模块来源：表列表按模块自己的链接带上那张表（不再借用项目默认表）', (await call('GET', '/tables')).json.tables.some((table) => table.tableId === 'tblModuleA'))
+  await setModules([])
+} finally {
+  await call('POST', '/settings', sinoSettings)
+}
 
 console.log('\n[13] v4 客户端：新模块与改名都到位，没留旧名字')
 check('已改名并定位为「AI Native 工作台」', clientSource.includes("title: 'AI Native 工作台'") && clientSource.includes("panelTitle: 'AI Native'"))
