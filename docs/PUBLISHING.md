@@ -96,8 +96,12 @@ DSH Desktop 另有一个「工作台市场」，收录仓库是 [dataelement/awe
 
 ## 7. 升级版本
 
-1. 改 `package.json` 的 `version`、`lib/client.js` 的 `WORKBENCH_VERSION`、`CHANGELOG.md` 顶部三处保持一致（冒烟自测会检查）；
-2. `node test/smoke.mjs`；
-3. 提交并推送；
-4. 走 npm 的：`npm publish` 新版本；走 Release 的：新建 Release 并上传同名固定文件名；
-5. 源码安装来源会在下一次市场构建时被重新发现；条目本身通常不用改。每个版本仍由作者自己验证。
+**发版节奏（用户多次强调，务必遵守）**：还没推到远程的改动，一律并入**同一个版本更新**里，一次发版；不要为每个小改动新开一个版本号。
+
+1. 先确认上一次的改动是否已经推送 + 发布。**没推没发** → 继续用当前 `CHANGELOG.md` 顶部那个版本，把新条目写进去（同时更新它的日期）；
+2. 已经 `git push` + `npm publish` 的版本才算发布完毕，之后的新改动才升补丁位；
+3. 改 `package.json` 的 `version`、`lib/client.js` 的 `WORKBENCH_VERSION`、`CHANGELOG.md` 顶部三处保持一致（冒烟自测会检查）；
+4. `node test/smoke.mjs`；
+5. 提交并推送；
+6. 走 npm 的：`npm publish` 新版本；走 Release 的：新建 Release 并上传同名固定文件名；
+7. 源码安装来源会在下一次市场构建时被重新发现；条目本身通常不用改。每个版本仍由作者自己验证。

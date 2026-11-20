@@ -659,17 +659,21 @@ export async function findTable(config, settings, key, view = null) {
     // 没配链接、且（目录不同 或 传的是自己的模块 key）时才去模块自己的目录里找表。
     const byModuleKey = `module:${module.key}` === wanted || module.key === wanted
     if (ownDir && (byModuleKey || ownDir !== currentDir) && !module.source) {
-        const scoped = await listTables(config, { ...settings, projectDir: ownDir }, view)
-        if (scoped.tables.length) {
-          // 只在「这个目录里确实有一张和这个模块对得上的表」时才换过去：
-          // 拿别人的表顶上，会让模块静默显示别的项目的需求。
-          const own = scoped.tables.find((table) => table.key === wanted) ??
-            scoped.tables.find((table) => table.sourceName === wanted) ??
-            scoped.tables.find((table) => table.tableId === wanted) ??
-            (scoped.tables.length === 1 ? scoped.tables[0] : null)
-          if (own) return { table: own, tables: scoped.tables, module, requirementConfig: scoped.requirementConfig, taskConfig: scoped.taskConfig }
-        }
+      const scoped = await listTables(config, { ...settings, projectDir: ownDir }, view)
+      if (scoped.tables.length) {
+        // 匹配顺序：模块 key / 源名 / 表 id 都对不上时，再看这个目录是不是正好一个需求源
+        // （「每个项目一个需求表」是最常见的情况）。目录里有多张又对不上，就不猜 ——
+        // 拿别人的表顶上会让模块静默显示别的项目的需求。
+        const own = scoped.tables.find((table) => table.key === wanted) ??
+          scoped.tables.find((table) => table.sourceName === wanted) ??
+          scoped.tables.find((table) => table.tableId === wanted) ??
+          (scoped.tables.filter((table) => table.kind === 'requirement').length === 1
+            ? scoped.tables.find((table) => table.kind === 'requirement')
+            : null) ??
+          (scoped.tables.length === 1 ? scoped.tables[0] : null)
+        if (own) return { table: own, tables: scoped.tables, module, requirementConfig: scoped.requirementConfig, taskConfig: scoped.taskConfig }
       }
+    }
   }
   return { table: wanted ? found ?? null : tables[0] ?? null, tables, module, requirementConfig, taskConfig }
 }
