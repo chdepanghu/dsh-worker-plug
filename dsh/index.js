@@ -14,7 +14,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { readFile, mkdir, readdir, rm, stat, writeFile, appendFile } from 'node:fs/promises'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
 
@@ -1014,8 +1014,13 @@ function toPlain(value) {
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   if (Array.isArray(value)) return value.map(toPlain).filter(Boolean).join('、')
   if (typeof value === 'object') {
-    for (const key of ['text', 'name', 'value', 'link', 'en_name']) {
-      if (key in value) return toPlain(value[key])
+    // 关联记录 / 查找引用：lark-cli 给的是 { id, display_name }（或 { record_id, text }），
+    // 以前只认 text/name，认不到就 JSON.stringify，界面于是显示成 {"id":"rec..."}。
+    for (const key of ['text', 'name', 'display_name', 'displayName', 'en_name', 'value', 'link', 'title', 'record_id']) {
+      if (key in value) {
+        const got = toPlain(value[key])
+        if (got) return got
+      }
     }
     if ('file_token' in value) return '[附件]'
     try {
@@ -1649,8 +1654,8 @@ async function collectSkillsInRoot(root, items) {
 }
 
 /** DeepSeek Harness 通用技能根（跨项目可用）；没有就返回空。 */
-function harnessSkillDir() {
-  const dshHome = process.env.DSH_HOME
+function harnessSkillDir(settings = null) {
+  const dshHome = dshHomeDir(settings)
   return dshHome ? join(dshHome, 'skills') : ''
 }
 
@@ -1694,7 +1699,7 @@ async function createSkill(config, settings, body) {
     if (!projectDir) return { ok: false, error: '还没选项目目录，先选一个再创建项目内技能' }
     dir = join(projectDir, '.claude', 'skills', name)
   } else {
-    const root = harnessSkillDir()
+    const root = harnessSkillDir(settings)
     if (!root) return { ok: false, error: '取不到 DSH_HOME，定位不到 DeepSeek Harness 技能目录' }
     dir = join(root, name)
   }
@@ -1749,8 +1754,12 @@ const SKILL_CONVENTIONS = [
 ]
 
 /** 用户级（全局）技能目录：环境变量可以改根，和 DSH 技能管理器保持一致。 */
+/** 当前这次列表调用所属的设置（只用于环境隔离，如测试把家目录指向临时目录）。 */
+let settingsHomeDir = ''
+
 function globalSkillDirs() {
-  const home = process.env.USERPROFILE || process.env.HOME || ''
+  // 测试或多套 Harness 并存时，用工作台设置把「用户家目录」换掉，避免写到真机目录
+  const home = process.env.USERPROFILE || process.env.HOME || settingsHomeDir || ''
   if (!home) return []
   const pick = (envName, fallback) => process.env[envName] || join(home, fallback)
   return [
@@ -1766,6 +1775,7 @@ function globalSkillDirs() {
 }
 
 function skillRootsFor(config, settings) {
+  settingsHomeDir = String(settings?.homeDir ?? '')
   const roots = []
   const push = (scope, convention, label, path, note = '') => {
     if (!path) return
@@ -1774,7 +1784,7 @@ function skillRootsFor(config, settings) {
     roots.push({ scope, convention, label, path, note, exists: existsSync(path) })
   }
   // 1) DeepSeek Harness 自己的技能根：跨项目通用，也是「新建技能」默认写入的位置
-  const harness = harnessSkillDir()
+  const harness = harnessSkillDir(settings)
   if (harness) push('harness', '', 'DeepSeek Harness · 通用技能', harness, 'DSH 全局技能根，任何项目都能用')
   // 2) 全局（用户级）约定目录
   for (const entry of globalSkillDirs()) push('global', entry.convention, entry.label, entry.path)
@@ -1820,7 +1830,7 @@ async function listSkills(config, settings) {
     items,
     docs,
     projectDir: settings.projectDir,
-    harnessSkillDir: harnessSkillDir(),
+    harnessSkillDir: harnessSkillDir(settings),
     summary: Object.values(summary),
   }
 }
@@ -1842,6 +1852,26 @@ async function readSkillFile(config, settings, target) {
 
 /* -------------------------------------------- 专家 / 专家团（参考 WorkBuddy） */
 
+/**
+ * DSH_HOME 落在哪：宿主进程通常不注入这个环境变量，但一定会注入 DSH_PROFILE_DIR
+ * （用户级 profile 目录，通常就是 <DSH_HOME>/profiles/<name>）。
+ * 这里按这个关系反推，避免「AI 直接创建」完稿了却写不进盘。
+ */
+function dshHomeDir(settings = null) {
+  const explicit = String(process.env.DSH_HOME ?? '').trim()
+  if (explicit) return explicit
+  const profileDir = String(process.env.DSH_PROFILE_DIR ?? '').trim()
+  if (profileDir) {
+    const parent = dirname(profileDir)
+    if (basename(parent) === 'profiles') return dirname(parent)
+  }
+  // 工作台设置里的 dshHome 优先（测试、或多套 Harness 并存时靠它指路）
+  const configured = String(settings?.dshHome ?? '').trim()
+  if (configured) return configured
+  const home = String(process.env.USERPROFILE || process.env.HOME || settingsHomeDir || '').trim()
+  return home ? join(home, '.dsh') : ''
+}
+
 /** 专家文件放哪：通用 = DSH_HOME/agents；项目 = <项目>/<约定>/agents（默认 .claude）。 */
 function expertDirFor(scope, convention, settings) {
   if (scope === 'project') {
@@ -1850,7 +1880,8 @@ function expertDirFor(scope, convention, settings) {
     const safe = SKILL_CONVENTIONS.some((entry) => entry.dir && entry.dir === convention) ? convention : '.claude'
     return join(projectDir, safe, 'agents')
   }
-  return process.env.DSH_HOME ? join(process.env.DSH_HOME, 'agents') : ''
+  const home = dshHomeDir(settings)
+  return home ? join(home, 'agents') : ''
 }
 
 function expertTargets(config, settings) {
@@ -1864,7 +1895,8 @@ function expertTargets(config, settings) {
 function teamFiles(config, settings) {
   const projectDir = String(settings.projectDir ?? '').trim()
   const list = []
-  if (process.env.DSH_HOME) list.push({ scope: 'harness', path: join(process.env.DSH_HOME, 'experts', 'teams.json'), label: 'DeepSeek Harness 通用专家团' })
+  const dshHome = dshHomeDir(settings)
+  if (dshHome) list.push({ scope: 'harness', path: join(dshHome, 'experts', 'teams.json'), label: 'DeepSeek Harness 通用专家团' })
   if (projectDir) list.push({ scope: 'project', path: join(projectDir, '.dsh', 'experts', 'teams.json'), label: '当前项目专家团' })
   return list
 }
@@ -1966,6 +1998,12 @@ async function createExpert(config, settings, body) {
   const scope = body?.scope === 'project' ? 'project' : 'harness'
   const dir = expertDirFor(scope, String(body?.convention || '.claude'), settings)
   if (!dir) return { ok: false, error: scope === 'project' ? '还没选项目目录，选一个再创建项目专家' : '取不到 DSH_HOME，定位不到通用专家目录' }
+  // 兜底：通用专家写进 <DSH_HOME>/agents，但工作台是从「同级 skills 目录」反推专家目录的。
+  // DSH_HOME 下没有 skills 时，写完会扫不到、界面看着像「没创建」——这里顺手建一个空目录。
+  if (scope === 'harness') {
+    const skillsDir = join(dirname(dir), 'skills')
+    if (!existsSync(skillsDir)) await mkdir(skillsDir, { recursive: true }).catch(() => {})
+  }
   const convention = scope === 'project' ? String(body?.convention || '.claude') : ''
   const file = join(dir, `${id}.md`)
   if (existsSync(file) && !body?.overwrite) return { ok: false, error: `专家「${id}」已存在，换个标识或先删掉它`, path: file, exists: true }

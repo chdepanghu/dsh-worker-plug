@@ -13,7 +13,21 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readFileSync } from 'node:fs'
-import { FLOW_EVIDENCE_KINDS, FLOW_STAGES, FLOW_STATUS, apply, alignMatrixColumns, buildBatchUpdatePayload, cellValueFor, checkAcceptanceCriteria, flowEvidenceStats, flowPercent, flowStageName, foldFlows, foldRuns, listTables, matrixShape, normalizeRecord, parseBaseInput, parseChangelog, parseDocInput, parseDocPayload, parseJsonLoose, parseLarkRecords, recordsFromMatrix, renderExpertMarkdown, renderSkillMarkdown, runTaskKey, slugifySkillName } from '../dsh/index.js'
+
+// 先隔离工作台的落盘根：ESM 导入会被提升，环境变量必须在 import 之前设好。
+// 不设的话，harness 技能根/专家目录会解析到本机真实的 <用户>/.dsh，
+// 测试用的「java-backend-expert」之类就会写进用户自己的目录。
+// 但**不要**改 USERPROFILE / HOME：lark-cli 这些子进程按家目录找自己的配置，
+// 改掉之后它会连登录态都找不到，真实表的用例会整片失败。
+const sandboxRoot = await mkdtemp(join(tmpdir(), 'rdw-sandbox-'))
+const sandboxDshHome = join(sandboxRoot, 'dsh-home')
+process.env.DSH_HOME = sandboxDshHome
+delete process.env.DSH_AGENTS_HOME
+delete process.env.DSH_CLAUDE_HOME
+delete process.env.DSH_CODEX_HOME
+delete process.env.DSH_GEMINI_HOME
+
+const { FLOW_EVIDENCE_KINDS, FLOW_STAGES, FLOW_STATUS, apply, alignMatrixColumns, buildBatchUpdatePayload, cellValueFor, checkAcceptanceCriteria, flowEvidenceStats, flowPercent, flowStageName, foldFlows, foldRuns, listTables, matrixShape, normalizeRecord, parseBaseInput, parseChangelog, parseDocInput, parseDocPayload, parseJsonLoose, parseLarkRecords, recordsFromMatrix, renderExpertMarkdown, renderSkillMarkdown, runTaskKey, slugifySkillName } = await import('../dsh/index.js')
 
 // 真实飞书表信息不写进仓库：优先读环境变量，其次读本机私有配置 test/smoke.local.json（已在 .gitignore 里）。
 // 都没有时用占位值 —— 真实网络相关的检查会降级为 WARN，不会判失败。
@@ -73,6 +87,36 @@ check('记录映射：标题/状态/项目/负责人自动识别', (() => {
 })())
 check('记录映射：没有标题字段时退回第一个字段', normalizeRecord({ record_id: 'r', fields: { 事项: '补一个接口' } }, {}).title === '补一个接口')
 check('记录映射：显式字段名优先', normalizeRecord({ record_id: 'r', fields: { A: '1', B: '2' } }, { titleField: 'B' }).title === '2')
+check('记录映射：单选/多选/人员/日期按人话显示', (() => {
+  const item = normalizeRecord({
+    record_id: 'r',
+    fields: {
+      标题: { text: '好使', segments: [] },
+      状态: '待开始',
+      模块: [{ name: '技能管理' }, { name: '报表' }],
+      负责人: [{ id: 'ou_1', name: '张三' }],
+      期望: { type: 'datetime', value: 1763500000000 },
+      附件: [{ file_token: 'box_x', name: 'a.png' }],
+    },
+  }, {})
+  return item.title === '好使' && item.fields['模块'] === '技能管理、报表' && item.fields['负责人'] === '张三' && item.fields['附件'] === 'a.png'
+})())
+// v4.5.12：关联记录/查找引用字段以前只认 text/name，认不到就 stringify，详情里显示成 {"id":"rec..."}
+check('记录映射：关联记录显示名字，不再露出 {"id":"rec..."}', (() => {
+  const item = normalizeRecord({
+    record_id: 'r',
+    fields: {
+      功能名称2: [{ id: 'recABC', display_name: '自主学习中心' }],
+      父记录: [{ id: 'recXYZ', text: '父需求：学习页改版' }],
+      只有id: [{ id: 'recOnly' }],
+    },
+  }, {})
+  return item.fields['功能名称2'] === '自主学习中心' &&
+    item.fields['父记录'] === '父需求：学习页改版' &&
+    !JSON.stringify(item.fields).includes('display_name') &&
+    !JSON.stringify(item.fields).includes('{"id":"rec')
+})())
+check('记录映射：关联记录对象直接就是 {id, display_name}', normalizeRecord({ record_id: 'r', fields: { 父: { id: 'recA', display_name: '父需求' } } }, {}).fields['父'] === '父需求')
 
 check('返回体解析：items / data.items / ndjson', (() => {
   const a = parseLarkRecords(JSON.stringify({ items: [{ record_id: '1' }] }))
@@ -421,9 +465,11 @@ check(
 
 /* ---------------- 专家 / 专家团（参考 WorkBuddy：角色文件 = agents/<id>.md） ---------------- */
 
-const expertHome = await mkdtemp(join(tmpdir(), 'rdw-expert-'))
-const savedHomeForExperts = process.env.DSH_HOME
-process.env.DSH_HOME = expertHome
+const expertHome = sandboxDshHome
+// 用设置里的 dshHome 指路，而不是改 process.env：改环境变量会连带让 lark-cli 这样的
+// 子进程也认不到登录态（它会按 HOME 找自己的配置），而且 ESM 导入早于环境变量赋值。
+const savedSettingsForExperts = (await call('GET', '/state')).json?.settings ?? {}
+await call('POST', '/settings', { dshHome: expertHome })
 try {
   const made = await call('POST', '/expert/create', {
     id: 'Java Backend Expert',
@@ -441,6 +487,35 @@ try {
     made.status === 200 && made.json?.path === join(expertHome, 'agents', 'java-backend-expert.md'),
     made.json,
   )
+  // v4.5.12：只给 DSH_PROFILE_DIR、没有 dshHome 时，也要能定位到 <DSH_HOME>/agents。
+  // 以前解析不到就整份草稿写完才失败（界面看着像点了没反应）。
+  {
+    // 清掉设置里的 dshHome，只靠环境变量 DSH_HOME（宿主真实的定位方式）
+    await call('POST', '/settings', { dshHome: '' })
+    const savedEnvHome = process.env.DSH_HOME
+    process.env.DSH_HOME = expertHome
+    let viaProfile
+    try {
+      viaProfile = await call('POST', '/expert/create', { id: 'fe-expert-profile', description: '前端专家' })
+    } finally {
+      process.env.DSH_HOME = savedEnvHome
+    }
+    check(
+      '新建专家：没配 dshHome 也按 DSH_HOME 落盘，不会因为目录空着就失败',
+      viaProfile.status === 200 && String(viaProfile.json?.path ?? '') === join(expertHome, 'agents', 'fe-expert-profile.md'),
+      viaProfile.json,
+    )
+    await call('POST', '/settings', { dshHome: expertHome })
+    // 写到 target 指定的目录（这里临时切到 DSH_HOME 下）之后，/experts 要能扫到它：
+    // 工作台是按「技能根的同级 agents」找专家的，所以 skills 目录要存在。
+    const targetDir = join(expertHome, 'agents')
+    const listed = await call('GET', '/experts')
+    check(
+      '新建专家：写入后能立刻扫到（通用专家目录的上级也建了 skills）',
+      listed.status === 200 && (listed.json?.experts ?? []).some((expert) => expert.agentId === 'fe-expert-profile'),
+      { dir: targetDir, found: (listed.json?.experts ?? []).map((expert) => expert.agentId), skillsExists: (await import('node:fs')).existsSync(join(expertHome, 'skills')) },
+    )
+  }
   const expertText = await (await import('node:fs/promises')).readFile(made.json.path, 'utf8').catch(() => '')
   check(
     '专家文件带 frontmatter（name/description/displayName/profession）与四段式正文',
@@ -518,8 +593,7 @@ try {
   const expertState = await call('GET', '/state')
   check('选中专家读回一致', expertState.json?.settings?.expert === 'agent:java-backend-expert', expertState.json?.settings?.expert)
 } finally {
-  if (savedHomeForExperts === undefined) delete process.env.DSH_HOME
-  else process.env.DSH_HOME = savedHomeForExperts
+  await call('POST', '/settings', { dshHome: savedSettingsForExperts.dshHome ?? '' })
 }
 
 check(
