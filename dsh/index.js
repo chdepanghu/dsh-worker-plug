@@ -641,7 +641,7 @@ export async function listTables(config, settings, view = null) {
 export async function findTable(config, settings, key, view = null) {
   const { tables, requirementConfig, taskConfig } = await listTables(config, settings, view)
   const wanted = String(key ?? '').trim()
-  const module = wanted ? (view?.modules ?? []).find((item) => item.key === wanted) ?? null : null
+  const module = wanted ? (view?.modules ?? []).find((item) => item.key === wanted || (item.source && `module:${item.key}` === wanted)) ?? null : null
   // 模块自带数据源：先按模块找，找到就用它自己的表和项目，不受当前项目换了影响。
   let fromModule = module ? moduleTable(module, { identity: config.identity, configPath: requirementConfig }) : null
   if (fromModule && !fromModule.baseToken) fromModule = null
@@ -651,6 +651,26 @@ export async function findTable(config, settings, key, view = null) {
       pool.find((table) => table.sourceName === wanted) ??
       pool.find((table) => table.tableId === wanted)
     : null
+  // 模块自己没配链接、但它记着另一个项目目录：那个目录里配的表就是这个模块的表
+  // （否则「每个模块一个工作区」只改了目录，表还停留在当前项目上）。
+  if (!found && module) {
+    const ownDir = String(module.projectDir ?? '').trim()
+    const currentDir = String(settings.projectDir ?? '').trim()
+    // 没配链接、且（目录不同 或 传的是自己的模块 key）时才去模块自己的目录里找表。
+    const byModuleKey = `module:${module.key}` === wanted || module.key === wanted
+    if (ownDir && (byModuleKey || ownDir !== currentDir) && !module.source) {
+        const scoped = await listTables(config, { ...settings, projectDir: ownDir }, view)
+        if (scoped.tables.length) {
+          // 只在「这个目录里确实有一张和这个模块对得上的表」时才换过去：
+          // 拿别人的表顶上，会让模块静默显示别的项目的需求。
+          const own = scoped.tables.find((table) => table.key === wanted) ??
+            scoped.tables.find((table) => table.sourceName === wanted) ??
+            scoped.tables.find((table) => table.tableId === wanted) ??
+            (scoped.tables.length === 1 ? scoped.tables[0] : null)
+          if (own) return { table: own, tables: scoped.tables, module, requirementConfig: scoped.requirementConfig, taskConfig: scoped.taskConfig }
+        }
+      }
+  }
   return { table: wanted ? found ?? null : tables[0] ?? null, tables, module, requirementConfig, taskConfig }
 }
 
@@ -3161,7 +3181,22 @@ export function apply(ctx, config) {
         if (!tableKey) return sendJson(res, 200, await fetchRequirements(config, settings))
         const fresh = url.searchParams.get('fresh') === '1'
         const { table, tables } = await findTable(config, settings, tableKey, await readView(config))
-        if (!table) return sendJson(res, 200, { configured: false, items: [], message: '没有找到这张表（项目里还没配到）' })
+        if (!table) {
+          // 这个模块记着自己的项目目录，但那个目录里还没配需求源：别报「全局没配置」把人挡在门外，
+          // 说清楚是哪个目录缺东西，并给出去处（点 🔗 直接配链接）。
+          const view = await readView(config)
+          const module = view.modules.find((item) => item.key === tableKey) ?? null
+          const ownDir = String(module?.projectDir ?? '').trim()
+          if (ownDir && !module?.source) {
+            return sendJson(res, 200, {
+              configured: false,
+              items: [],
+              message: `这个模块的工作区是「${ownDir}」，但那个目录里没有配需求源（sino-skill-config.json）。可以点模块名旁的 🔗 直接给这个模块贴一条多维表格链接（只影响本模块）。`,
+              workspaceDir: ownDir,
+            })
+          }
+          return sendJson(res, 200, { configured: false, items: [], message: '没有找到这张表（项目里还没配到）' })
+        }
         const payload = await fetchTableRecords(config, table, { fresh })
         if (!payload.ok) {
           return sendJson(res, 200, { configured: true, items: [], source: publicTable(table), error: payload.error, detail: payload.detail, command: payload.command })

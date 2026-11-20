@@ -2783,6 +2783,24 @@ try {
   check('模块工作区：不存在的模块返回 404', wsUnknown.status === 404, wsUnknown.json)
   const wsClear = await call('POST', '/workspace', { moduleKey: 'req-a', projectDir: '' })
   check('模块工作区：留空即恢复跟随当前项目', wsClear.status === 200 && (await call('GET', '/workspace?module=req-a')).json.ownProjectDir === '', wsClear.json)
+  // v4.5.11：模块有自己目录、但目录里没配需求源时，要说明「是哪个目录缺东西」，不能报成「项目没配」
+  // （先证明能取到「模块目录里配的表」，再把这个目录换成空的，验证缺源提示）
+  const readByDir = (await call('GET', '/requirements?table=req-b')).json
+  check('模块工作区：没配链接时按模块自己的目录取表，而不是停在当前项目', readByDir?.configured === true && String(readByDir?.source?.tableId ?? '').length > 1, readByDir)
+  const emptyDir = join(twoDirs.base, 'project-empty')
+  await (await import('node:fs/promises')).mkdir(emptyDir, { recursive: true })
+  // 先把两个模块都清干净（链接/目录），再只给 req-b 一个空目录，避免沿用前面的状态
+  await setModules([
+    { key: 'req-a', tableKey: 'requirement:adjustments', title: '开发需求 · A', view: 'list' },
+    { key: 'req-b', tableKey: 'requirement:adjustments-b', title: '开发需求 · B', view: 'list' },
+  ])
+  await call('POST', '/workspace', { moduleKey: 'req-b', projectDir: emptyDir })
+  const noSourceMsg = (await call('GET', '/requirements?table=req-b')).json
+  check(
+    '模块工作区：模块目录里没配需求源时，提示带上这个模块的目录',
+    noSourceMsg?.configured === false && String(noSourceMsg?.message ?? '').includes(emptyDir) && noSourceMsg?.workspaceDir === emptyDir,
+    noSourceMsg,
+  )
   await setModules([])
 } finally {
   await call('POST', '/settings', sinoSettings)
