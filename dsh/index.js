@@ -765,6 +765,19 @@ async function readRecordsWithFallback({ wrapper, common, outFile, limit = 2000,
   }
 }
 
+/** 这条记录里是否还有「只有 id、没有名字」的关联字段值。 */
+function hasLinkIdOnly(record) {
+  const fields = record?.fields && typeof record.fields === 'object' ? record.fields : record ?? {}
+  return Object.values(fields).some((value) => {
+    const list = Array.isArray(value) ? value : [value]
+    return list.some((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return false
+      const id = String(item.id ?? item.record_id ?? '')
+      if (!id.startsWith('rec')) return false
+      return !String(item.display_name ?? item.text ?? item.title ?? '').trim()
+    })
+  })
+}
 async function fetchTableRecords(config, table, { fresh = false, limit = 2000 } = {}) {
   const cacheId = JSON.stringify([config.root, table.configPath, table.key, table.baseToken, table.tableId, table.viewId, table.identity, limit, table.maxRecords, table.sino && table.filter])
   const hit = recordCache.get(cacheId)
@@ -784,11 +797,90 @@ async function fetchTableRecords(config, table, { fresh = false, limit = 2000 } 
   if (read.failure) {
     return { ok: false, records: [], error: read.failure.error, detail: read.failure.detail, command: read.failure.command }
   }
-  const payload = { ok: true, records: filterSinoRecords(read.records, table), fetchMode: read.fetchMode, warning: read.warning, ndjsonError: read.ndjsonError, at: Date.now() }
-  recordCache.set(cacheId, { at: Date.now(), payload })
+  // 关联字段只有 id：跨表把它们换成记录标题（每张表各自受 60 秒缓存保护，不会每次全量拉）
+  let records = filterSinoRecords(read.records, table)
+  if (records.some((record) => hasLinkIdOnly(record))) {
+    // 超时兜底：建索引最多等 6 秒，宁可这次先显示「关联记录」，也不让详情卡住
+    const index = await Promise.race([
+      buildRecordIndex(config, table).catch(() => null),
+      new Promise((resolveTimeout) => setTimeout(() => resolveTimeout(null), 6000)),
+    ]).catch(() => null)
+    if (index && index.size) records = resolveLinkFields(records, index)
+  }
+  const payload = { ok: true, records, fetchMode: read.fetchMode, warning: read.warning, ndjsonError: read.ndjsonError, at: Date.now() }
+  // 关联 id 没解析出名字时不要缓存全局结果：可能只是这次超时，下次得再试
+  const pendingLink = records.some((record) => hasLinkIdOnly(record))
+  if (!pendingLink) recordCache.set(cacheId, { at: Date.now(), payload })
   return payload
 }
 
+/**
+ * 关联字段解析：飞书 record-list 的关联/查找字段只回 [{"id":"rec..."}]，**不带名字**。
+ * 而这些 id 往往指向同一 base 里的另一张表（例如「功能名称2」→「1.模块和功能」）。
+ * 这里把每张表各读一次（受同一份 60 秒缓存保护），建立 record_id -> 显示值 的映射，
+ * 再把关联字段里的 id 换成那张表里那条记录的主标题。
+ */
+async function buildRecordIndex(config, table) {
+  const larkCli = await resolveLarkCli(config.larkCli)
+  const wrapper = shellWrapper(larkCli)
+  // 表清单：table-list 不支持 --output，只能读 stdout（成功时是一段 JSON）
+  const list = await runLark(wrapper, ['base', '+table-list', '--base-token', table.baseToken, '--as', table.identity])
+  const rawText = String(list.stdout || '').trim()
+  let parsed = []
+  try {
+    parsed = rawText ? [JSON.parse(rawText)] : []
+  } catch {
+    parsed = parseLarkRecords(rawText)
+  }
+  // 结构可能是 {data:{tables:[...]}}、{tables:[...]}，或者裸数组
+  const collect = (node, out = []) => {
+    if (Array.isArray(node)) {
+      for (const entry of node) collect(entry, out)
+      return out
+    }
+    if (node && typeof node === 'object') {
+      if (typeof node.id === 'string' && node.id.startsWith('tbl')) out.push(node)
+      for (const value of Object.values(node)) collect(value, out)
+    }
+    return out
+  }
+  const tables = collect(parsed)
+  const candidates = [...new Set(tables.map((entry) => String(entry?.id ?? '')).filter(Boolean))]
+  const index = new Map()
+  for (const tableId of candidates) {
+    const scoped = { ...table, tableId, viewId: '', sino: false, filter: null }
+    const payload = await fetchTableRecords(config, scoped).catch(() => null)
+    if (!payload?.ok) continue
+    for (const record of payload.records) {
+      const fields = record?.fields && typeof record.fields === 'object' ? record.fields : record ?? {}
+      const names = Object.keys(fields).filter((name) => name !== 'record_id')
+      // 主标题取「第一个像名字的列」：优先含 名称/页面/标题/需求 的列，其次第一列非空短文本
+      const named = names.find((name) => /名称|页面|标题|需求|任务|功能/.test(name) && toPlain(fields[name]))
+      const title = toPlain(fields[named]) || names.map((name) => toPlain(fields[name])).find((text) => text && text.length <= 80) || ''
+      if (title) index.set(String(record.record_id ?? record.recordId ?? ''), title)
+    }
+  }
+  return index
+}
+
+/** 把一张表记录里的关联字段 id 换成可读名字（找不到就保留「关联记录」这类占位）。 */
+export function resolveLinkFields(records, index) {
+  if (!index || !index.size) return records
+  const swap = (value) => {
+    if (Array.isArray(value)) return value.map(swap)
+    if (!value || typeof value !== 'object') return value
+    const id = String(value.id ?? value.record_id ?? '')
+    if (id.startsWith('rec') && index.has(id) && Object.keys(value).length <= 3) return { id, display_name: index.get(id) }
+    return value
+  }
+  return records.map((record) => {
+    const fields = record?.fields
+    if (!fields || typeof fields !== 'object') return record
+    const next = {}
+    for (const [name, value] of Object.entries(fields)) next[name] = swap(value)
+    return { ...record, fields: next }
+  })
+}
 function filterSinoRecords(records, source) {
   if (!source.sino || !source.filter || typeof source.filter !== 'object' || Array.isArray(source.filter)) return records
   const rules = Object.entries(source.filter).filter(([, values]) => Array.isArray(values) && values.length)

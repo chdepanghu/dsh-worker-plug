@@ -27,7 +27,7 @@ delete process.env.DSH_CLAUDE_HOME
 delete process.env.DSH_CODEX_HOME
 delete process.env.DSH_GEMINI_HOME
 
-const { FLOW_EVIDENCE_KINDS, FLOW_STAGES, FLOW_STATUS, apply, alignMatrixColumns, buildBatchUpdatePayload, cellValueFor, checkAcceptanceCriteria, flowEvidenceStats, flowPercent, flowStageName, foldFlows, foldRuns, listTables, matrixShape, normalizeRecord, parseBaseInput, parseChangelog, parseDocInput, parseDocPayload, parseJsonLoose, parseLarkRecords, recordsFromMatrix, renderExpertMarkdown, renderSkillMarkdown, runTaskKey, slugifySkillName } = await import('../dsh/index.js')
+const { FLOW_EVIDENCE_KINDS, FLOW_STAGES, FLOW_STATUS, apply, alignMatrixColumns, buildBatchUpdatePayload, cellValueFor, checkAcceptanceCriteria, flowEvidenceStats, flowPercent, flowStageName, foldFlows, foldRuns, listTables, matrixShape, normalizeRecord, parseBaseInput, parseChangelog, parseDocInput, parseDocPayload, parseJsonLoose, parseLarkRecords, recordsFromMatrix, renderExpertMarkdown, renderSkillMarkdown, resolveLinkFields, runTaskKey, slugifySkillName } = await import('../dsh/index.js')
 
 // 真实飞书表信息不写进仓库：优先读环境变量，其次读本机私有配置 test/smoke.local.json（已在 .gitignore 里）。
 // 都没有时用占位值 —— 真实网络相关的检查会降级为 WARN，不会判失败。
@@ -127,6 +127,14 @@ check('记录映射：只有 id 的关联记录不露 JSON，显示可读字样'
     !JSON.stringify(item.fields).includes('{\"id\"')
 })())
 check('记录映射：关联记录多个也是一句人话', normalizeRecord({ record_id: 'r', fields: { 关联: [{ id: 'reca' }, { id: 'recb' }] } }, {}).fields['关联'] === '关联记录、关联记录')
+// v4.5.12：关联字段的 id 指向同一 base 的另一张表，读取时跨表换成那边的记录标题
+check('关联字段：跨表把 rec id 换成记录标题，只换纯 id 的值', (() => {
+  const index = new Map([['reczz28Z6wGJIFOB', '自主学习中心']])
+  const [rec] = resolveLinkFields([{ record_id: 'r', fields: { 功能名称2: [{ id: 'reczz28Z6wGJIFOB' }], 未知关联: [{ id: 'recMissing' }], 开发顾问: [{ id: 'ou_x', name: 'Thomas' }] } }], index)
+  return normalizeRecord(rec, {}).fields['功能名称2'] === '自主学习中心' &&
+    normalizeRecord(rec, {}).fields['未知关联'] === '关联记录' &&
+    normalizeRecord(rec, {}).fields['开发顾问'] === 'Thomas'
+})())
 
 check('返回体解析：items / data.items / ndjson', (() => {
   const a = parseLarkRecords(JSON.stringify({ items: [{ record_id: '1' }] }))
