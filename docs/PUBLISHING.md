@@ -99,7 +99,7 @@ DSH Desktop 另有一个「工作台市场」，收录仓库是 [dataelement/awe
 **发版节奏（用户多次强调，务必遵守）**：还没推到远程的改动，一律并入**同一个版本更新**里，一次发版；不要为每个小改动新开一个版本号。
 
 1. 先确认上一次的改动是否已经推送 + 发布。**没推没发** → 继续用当前 `CHANGELOG.md` 顶部那个版本，把新条目写进去（同时更新它的日期）；
-2. 已经 `git push` + `npm publish` 的版本才算发布完毕，之后的新改动才升补丁位；
+2. 已经发到远程（`git push` 过 or `npm view <包> time` 里有这个版本）的版本才算发布完毕，之后的新改动才升补丁位 —— **远程已有这个版本号，就只能开下一个补丁位**（npm 不允许重发同版本，会 `E403 cannot publish over the previously published versions`）；
 3. 改 `package.json` 的 `version`、`lib/client.js` 的 `WORKBENCH_VERSION`、`CHANGELOG.md` 顶部三处保持一致（冒烟自测会检查）；
 4. `node test/smoke.mjs`；
 5. 提交并推送；
