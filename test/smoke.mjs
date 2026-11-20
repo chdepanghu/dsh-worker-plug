@@ -117,6 +117,16 @@ check('记录映射：关联记录显示名字，不再露出 {"id":"rec..."}', 
     !JSON.stringify(item.fields).includes('{"id":"rec')
 })())
 check('记录映射：关联记录对象直接就是 {id, display_name}', normalizeRecord({ record_id: 'r', fields: { 父: { id: 'recA', display_name: '父需求' } } }, {}).fields['父'] === '父需求')
+// v4.5.12 实测：lark-cli 的关联字段只回 [{"id":"rec..."}]，没有名字。
+// 这种值必须显示成「关联记录」这种可读字样，绝不能把 {"id":"..."} 摊到界面上。
+check('记录映射：只有 id 的关联记录不露 JSON，显示可读字样', (() => {
+  const item = normalizeRecord({ record_id: 'r', fields: { 功能名称2: [{ id: 'reczz28Z6wGJIFOB' }], 父记录: [{ id: 'recX', text: '' }] } }, {})
+  return item.fields['功能名称2'] === '关联记录' &&
+    item.fields['父记录'] === '关联记录' &&
+    !JSON.stringify(item.fields).includes('reczz28Z6wGJIFOB') &&
+    !JSON.stringify(item.fields).includes('{\"id\"')
+})())
+check('记录映射：关联记录多个也是一句人话', normalizeRecord({ record_id: 'r', fields: { 关联: [{ id: 'reca' }, { id: 'recb' }] } }, {}).fields['关联'] === '关联记录、关联记录')
 
 check('返回体解析：items / data.items / ndjson', (() => {
   const a = parseLarkRecords(JSON.stringify({ items: [{ record_id: '1' }] }))

@@ -1023,6 +1023,10 @@ function toPlain(value) {
       }
     }
     if ('file_token' in value) return '[附件]'
+    // 关联记录只回了 id、没有名字（飞书 record-list 就是这样）：显示可读字样，
+    // 绝不把 {"id":"rec..."} 摊到界面上。
+    const id = String(value.id ?? value.record_id ?? '')
+    if (id.startsWith('rec')) return '关联记录'
     try {
       return JSON.stringify(value)
     } catch {
